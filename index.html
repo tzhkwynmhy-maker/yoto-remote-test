@@ -1,0 +1,571 @@
+<!doctype html>
+<html lang="en-NZ">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex">
+<title>Yoto Remote Test</title>
+<style>
+  :root { --bg:#eef3f2; --ink:#1f2d2b; --soft:#5c6e6b; --accent:#0f8b7d; --accent-dark:#0a665c; --card:#fff; --line:#c9d9d6; --bad:#b3261e; --good:#2e7d32; --warn:#a35c00; }
+  * { box-sizing: border-box; }
+  [hidden] { display:none !important; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif; }
+  main { max-width:680px; margin:0 auto; padding:max(env(safe-area-inset-top),14px) 14px 60px; }
+  h1 { margin:6px 0 2px; font-size:1.5rem; }
+  .tag { display:inline-block; background:#ffe3a3; color:#6b4a00; font-weight:800; font-size:.75rem; padding:3px 10px; border-radius:999px; }
+  .panel { background:var(--card); border:1px solid var(--line); border-radius:16px; padding:14px 16px; margin:12px 0; }
+  .panel h2 { margin:0 0 8px; font-size:1.1rem; }
+  .soft { color:var(--soft); }
+  .err { color:var(--bad); font-weight:700; }
+  .good { color:var(--good); font-weight:700; }
+  .warn { color:var(--warn); font-weight:700; }
+  button { font:inherit; border:0; cursor:pointer; border-radius:999px; padding:11px 22px; font-weight:700; background:#d9e8e5; color:var(--ink); }
+  button.pri { background:var(--accent); color:#fff; box-shadow:0 4px 0 var(--accent-dark); }
+  button.pri:active { transform:translateY(2px); box-shadow:0 2px 0 var(--accent-dark); }
+  button:disabled { opacity:.45; cursor:default; box-shadow:none; }
+  button.stop { background:#c62828; color:#fff; font-size:1.4rem; padding:18px 30px; width:100%; box-shadow:0 5px 0 #8e1b1b; }
+  input[type=search], input[type=text] { width:100%; font:inherit; padding:10px 14px; border-radius:12px; border:2px solid var(--line); margin:6px 0; }
+  .pick { display:flex; gap:10px; align-items:center; padding:9px 4px; border-bottom:1px solid #eef3f2; }
+  .pick input { width:22px; height:22px; flex:none; accent-color:var(--accent); }
+  .pick img { width:36px; aspect-ratio:2/3; object-fit:cover; border-radius:6px; background:#d9e8e5; flex:none; }
+  .list { max-height:280px; overflow:auto; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-top:8px; }
+  table { border-collapse:collapse; width:100%; margin-top:6px; }
+  td, th { text-align:left; padding:5px 8px; border-bottom:1px solid #e3ecea; font-size:.95rem; }
+  pre { background:#f1f6f5; padding:10px; border-radius:10px; font-size:.72rem; overflow:auto; max-height:260px; white-space:pre-wrap; word-break:break-all; user-select:text; -webkit-user-select:text; }
+  code { background:#fff; padding:2px 6px; border-radius:6px; word-break:break-all; user-select:text; -webkit-user-select:text; }
+  .big { font-size:2.4rem; font-weight:800; text-align:center; margin:6px 0; }
+  label.chk { display:flex; gap:10px; align-items:flex-start; padding:6px 0; }
+  label.chk input { width:22px; height:22px; flex:none; accent-color:var(--accent); margin-top:2px; }
+</style>
+</head>
+<body>
+<main>
+
+<section id="login" hidden>
+  <h1>Yoto Remote Test <span class="tag">TEST PAGE</span></h1>
+  <div class="panel">
+    <p>A throwaway page to find out whether remotely starting a card makes a Yoto player download it. It starts <b>one</b> card on <b>one</b> player for a few seconds, then stops it.</p>
+    <p class="soft">When you sign in, Yoto will warn that this app is unverified and will list a permission to <b>remotely control your players</b>. That is expected for this test. Check the address is <b>login.yotoplay.com</b>.</p>
+    <div id="idBox" hidden>
+      <p><b>First-time set-up:</b> paste the Client ID from the Yoto developer site for this test app.</p>
+      <input id="idInput" type="text" placeholder="tpc_..." autocomplete="off" autocapitalize="off" spellcheck="false">
+      <button id="idSave" class="pri">Save Client ID</button>
+    </div>
+    <div class="row"><button id="loginBtn" class="pri">Sign in with Yoto</button></div>
+    <p id="loginErr" class="err" hidden></p>
+    <details class="soft"><summary>Set-up note</summary>
+      <p>This page's address is <code id="redirectShow"></code><br>It must be listed under "Allowed Callback URLs" in the Yoto developer app (and Allowed Logout URLs left empty).</p>
+    </details>
+  </div>
+</section>
+
+<section id="app" hidden>
+  <h1>Yoto Remote Test <span class="tag">TEST PAGE</span></h1>
+  <p class="soft">Sign-in lasts about 10 minutes. If it stops working, press "Start again".</p>
+
+  <div class="panel" id="s1">
+    <h2>1. Which player?</h2>
+    <div id="devList" class="list"><span class="soft">Loading players…</span></div>
+  </div>
+
+  <div class="panel" id="s2">
+    <h2>2. Which card?</h2>
+    <input id="cardSearch" type="search" placeholder="Search your playlists" autocomplete="off" autocapitalize="off" spellcheck="false" value="barbie">
+    <div id="cardList" class="list"><span class="soft">Loading playlists…</span></div>
+  </div>
+
+  <div class="panel" id="s3">
+    <h2>3. Check the player</h2>
+    <p class="soft">Reads the player's current state (nothing is played). Needs the player to be switched on and online.</p>
+    <div class="row"><button id="connectBtn" class="pri" disabled>Connect and read player</button></div>
+    <p id="connMsg" class="soft"></p>
+    <table id="statTbl" hidden>
+      <tr><th>Player</th><td id="stName"></td></tr>
+      <tr><th>Playing?</th><td id="stPlay"></td></tr>
+      <tr><th>Card in the player?</th><td id="stCard"></td></tr>
+      <tr><th>Volume</th><td id="stVol"></td></tr>
+      <tr><th>Free space</th><td id="stDisk"></td></tr>
+    </table>
+  </div>
+
+  <div class="panel" id="s4">
+    <h2>4. Before starting</h2>
+    <label class="chk"><input type="checkbox" id="ck1"> <span>I turned the player's volume <b>right down</b> using the player's own buttons.</span></label>
+    <label class="chk"><input type="checkbox" id="ck2"> <span>Willow is <b>not using</b> this player and nothing is playing on it.</span></label>
+    <label class="chk"><input type="checkbox" id="ck3"> <span>I will keep this page open on screen until it says it's finished.</span></label>
+    <p class="soft">The card plays for <b id="secsTxt">20</b> seconds, then this page stops it. The big red button stops it at any time.</p>
+    <div class="row"><button id="startBtn" class="pri" disabled>Start the card</button></div>
+  </div>
+
+  <div class="panel" id="s5" hidden>
+    <h2>Running</h2>
+    <div class="big" id="countdown"></div>
+    <button id="stopBtn" class="stop">STOP NOW</button>
+    <p id="runMsg" class="soft"></p>
+  </div>
+
+  <div class="panel" id="s6" hidden>
+    <h2>Results</h2>
+    <p id="verdict"></p>
+    <table id="readTbl"><tr><th>When</th><th>Free space</th><th>Change</th></tr></table>
+    <p class="soft">Now look at the Yoto app: <b>Settings → My Players → the big Yoto → Audio download status</b>. Does the card show as waiting or downloading?</p>
+    <div class="row">
+      <button id="rereadBtn">Read free space again</button>
+      <button id="copyBtn">Copy results</button>
+      <button id="doneBtn">Disconnect</button>
+    </div>
+    <pre id="out"></pre>
+  </div>
+
+  <p class="soft" style="text-align:center;margin-top:24px"><button id="restart">Start again</button> <button id="signOut">Sign out</button></p>
+</section>
+
+</main>
+
+<script>
+'use strict';
+
+const VERSION = 'v1: remote start test';
+const PLAY_SECONDS = 20;                  // how long the card plays before the page stops it
+const READ_AT = [10, 30, 60, 120];        // seconds after starting: read the player's free space again
+const MQTT_URL = 'wss://aqrphjqbp3u2z-ats.iot.eu-west-2.amazonaws.com/mqtt';
+const AUTHORIZER = 'PublicJWTAuthorizer';
+const MQTT_LIBS = ['https://cdn.jsdelivr.net/npm/mqtt@5.10.1/dist/mqtt.min.js', 'https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js'];
+
+const CONFIG = {
+  authorizeUrl: 'https://login.yotoplay.com/authorize',
+  tokenUrl: 'https://login.yotoplay.com/oauth/token',
+  apiBase: 'https://api.yotoplay.com',
+  audience: 'https://api.yotoplay.com',
+  // library + player list are view-only; "control" is the permission this test is about.
+  scope: 'family:library:view family:devices:view family:devices:control',
+  redirectUri: location.origin + location.pathname
+};
+
+const $ = (id) => document.getElementById(id);
+function el(tag, attrs = {}, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) { if (k === 'class') e.className = v; else e.setAttribute(k, v); }
+  for (const k of kids) e.append(k);
+  return e;
+}
+// All storage keys start with rt_ because other Yoto pages on this site use the same storage area.
+function store(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+function fetchStored(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+function unstore(k) { try { localStorage.removeItem(k); } catch (e) {} }
+function clientId() { return fetchStored('rt_clientid') || ''; }
+
+// <logic>
+function mask(id) { return id ? '…' + String(id).slice(-4) : ''; }
+function fmtKB(kb) {
+  if (typeof kb !== 'number' || !isFinite(kb)) return 'unknown';
+  const mb = kb / 1024;
+  return mb >= 1024 ? (mb / 1024).toFixed(2) + ' GB' : mb.toFixed(1) + ' MB';
+}
+// Which reasons stop us from starting. Returns a list of plain-words problems (empty = fine to go).
+function blockers(device, status) {
+  const out = [];
+  if (!device) out.push('Choose a player first.');
+  else if (device.online === false) out.push('The player says it is offline. Switch it on and check its Wi-Fi.');
+  if (!status) out.push('The player has not reported its state yet.');
+  else {
+    if (String(status.playingStatus || '').toLowerCase() === 'playing') out.push('The player is playing something right now. Pause it first.');
+    if (status.cardInserted === true) out.push('There is a card in the player. Take it out first.');
+  }
+  return out;
+}
+function describeChange(before, after) {
+  if (typeof before !== 'number' || typeof after !== 'number') return '';
+  const d = after - before;
+  if (d === 0) return 'no change';
+  return (d < 0 ? 'down ' : 'up ') + fmtKB(Math.abs(d));
+}
+// A plain-words reading of the evidence so far.
+function verdictFrom(run) {
+  const bits = [];
+  if (run.startReply === 'FAIL') return { cls: 'err', text: 'The player replied FAIL to the start command, so it did not start the card. This is about the command or the card address, not about downloading.' };
+  if (!run.started) return { cls: 'warn', text: 'The start command has not been sent.' };
+  if (run.startReply === 'OK' || run.sawPlaying) bits.push('The player accepted the start command' + (run.sawPlaying ? ' and reported playing.' : '.'));
+  else bits.push('The player did not clearly confirm the start command (no reply, no "playing" report). It may not have started.');
+  const first = run.readings.find((r) => r.kb != null);
+  const last = run.readings.slice().reverse().find((r) => r.kb != null);
+  if (first && last && first !== last) {
+    const d = last.kb - first.kb;
+    if (d < -500) bits.push('Free space dropped by ' + fmtKB(-d) + ': a sign that something was saved on the player.');
+    else bits.push('Free space did not change meaningfully (' + describeChange(first.kb, last.kb) + '). Not proof either way, since the download may not have begun yet.');
+  }
+  return { cls: '', text: bits.join(' ') };
+}
+// </logic>
+
+/* ---------- sign-in (PKCE) ---------- */
+function b64url(buf) {
+  let s = ''; for (const b of new Uint8Array(buf)) s += String.fromCharCode(b);
+  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+function randomString(n) { const a = new Uint8Array(n); crypto.getRandomValues(a); return b64url(a).slice(0, n); }
+async function challengeFor(v) { return b64url(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(v))); }
+
+async function startLogin() {
+  if (!clientId()) { showLogin('Please paste the Client ID first.'); return; }
+  const verifier = randomString(64), st = randomString(24);
+  store('rt_verifier', verifier); store('rt_state', st);
+  const params = new URLSearchParams({
+    audience: CONFIG.audience, scope: CONFIG.scope, response_type: 'code', client_id: clientId(),
+    code_challenge: await challengeFor(verifier), code_challenge_method: 'S256',
+    redirect_uri: CONFIG.redirectUri, state: st
+  });
+  location.href = CONFIG.authorizeUrl + '?' + params.toString();
+}
+async function handleCallback() {
+  const q = new URLSearchParams(location.search);
+  if (!q.has('code') && !q.has('error')) return;
+  const code = q.get('code'), returned = q.get('state');
+  const errorText = q.get('error_description') || q.get('error');
+  history.replaceState({}, '', CONFIG.redirectUri);
+  if (errorText) throw new Error('Yoto said: ' + errorText);
+  const verifier = fetchStored('rt_verifier'), expected = fetchStored('rt_state');
+  unstore('rt_verifier'); unstore('rt_state');
+  if (!verifier || returned !== expected) throw new Error('Sign-in was interrupted. Please try again.');
+  const res = await fetch(CONFIG.tokenUrl, {
+    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ grant_type: 'authorization_code', client_id: clientId(), code_verifier: verifier, code, redirect_uri: CONFIG.redirectUri })
+  });
+  if (!res.ok) throw new Error('Sign-in failed (code ' + res.status + ').');
+  const t = await res.json();
+  store('rt_tokens', JSON.stringify({ access_token: t.access_token, exp: Date.now() + (t.expires_in || 600) * 1000 }));
+}
+function getTokens() { try { return JSON.parse(fetchStored('rt_tokens') || 'null'); } catch (e) { return null; } }
+function tokenValid() { const t = getTokens(); return !!(t && t.access_token && Date.now() < t.exp - 20000); }
+async function api(path) {
+  const t = getTokens();
+  if (!t || !tokenValid()) throw new Error('signin');
+  const res = await fetch(CONFIG.apiBase + path, { headers: { Authorization: 'Bearer ' + t.access_token } });
+  if (res.status === 401) throw new Error('signin');
+  if (!res.ok) throw new Error('Yoto replied with code ' + res.status + '.');
+  return res.json();
+}
+
+function showLogin(msg) {
+  $('app').hidden = true; $('login').hidden = false;
+  $('redirectShow').textContent = CONFIG.redirectUri;
+  $('idBox').hidden = !!clientId();
+  const e = $('loginErr'); e.hidden = !msg; e.textContent = msg || '';
+}
+function showApp() { $('login').hidden = true; $('app').hidden = false; }
+
+/* ---------- state ---------- */
+const S = {
+  devices: [], cards: [], device: null, card: null,
+  client: null, connected: false, status: null, mqttAttempt: '', mqttErrors: [],
+  log: [], run: null, timers: [], countdownTimer: null, lostWarned: false
+};
+function note(what) { S.log.push({ t: new Date().toISOString().slice(11, 19), what }); if (S.log.length > 120) S.log.shift(); }
+function clearTimers() { for (const t of S.timers) clearTimeout(t); S.timers = []; clearInterval(S.countdownTimer); S.countdownTimer = null; }
+
+/* ---------- steps 1 and 2: choose player and card ---------- */
+async function loadChoices() {
+  try {
+    const d = await api('/device-v2/devices/mine');
+    S.devices = (Array.isArray(d.devices) ? d.devices : []).map((x) => ({ id: x.deviceId, name: x.name || 'Player', online: x.online, type: x.deviceType || '' }));
+  } catch (e) { return fail(e); }
+  renderDevices();
+  try {
+    const fam = await api('/card/family/library?coverWidth=400&view=groups');
+    const byId = new Map();
+    for (const it of (fam.cards || [])) {
+      const c = it.card || {}; const id = it.cardId || c.cardId;
+      if (id && !byId.has(id)) byId.set(id, { id, title: c.title || 'Untitled', cover: (c.metadata && c.metadata.cover && c.metadata.cover.imageL) || null });
+    }
+    S.cards = Array.from(byId.values()).sort((a, b) => a.title.localeCompare(b.title, undefined, { sensitivity: 'base' }));
+  } catch (e) { return fail(e); }
+  renderCards();
+}
+function fail(e) {
+  if (e.message === 'signin') { showLogin('Your sign-in has run out (it only lasts about 10 minutes). Please sign in again.'); return; }
+  $('connMsg').className = 'err'; $('connMsg').textContent = e.message;
+}
+function renderDevices() {
+  const box = $('devList'); box.replaceChildren();
+  if (!S.devices.length) { box.textContent = 'No players found on this account.'; return; }
+  for (const d of S.devices) {
+    const r = el('input', { type: 'radio', name: 'dev' });
+    r.checked = S.device && S.device.id === d.id;
+    r.addEventListener('change', () => { S.device = d; resetConnection(); updateButtons(); });
+    box.append(el('label', { class: 'pick' }, r, el('span', {}, d.name + ' ' + (d.online ? '(online)' : '(offline)'))));
+  }
+}
+function renderCards() {
+  const box = $('cardList'); box.replaceChildren();
+  const q = $('cardSearch').value.trim().toLowerCase();
+  const list = S.cards.filter((c) => q.split(/\s+/).filter(Boolean).every((w) => c.title.toLowerCase().includes(w))).slice(0, 30);
+  if (!list.length) { box.textContent = 'Nothing matches.'; return; }
+  for (const c of list) {
+    const r = el('input', { type: 'radio', name: 'card' });
+    r.checked = S.card && S.card.id === c.id;
+    r.addEventListener('change', () => { S.card = c; updateButtons(); });
+    const img = el('img', { alt: '' }); if (c.cover) img.src = c.cover;
+    box.append(el('label', { class: 'pick' }, r, img, el('span', {}, c.title)));
+  }
+}
+
+/* ---------- MQTT ---------- */
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    const timer = setTimeout(() => reject(new Error('timeout loading ' + src)), 15000);
+    s.src = src;
+    s.onload = () => { clearTimeout(timer); resolve(); };
+    s.onerror = () => { clearTimeout(timer); reject(new Error('could not load ' + src)); };
+    document.head.append(s);
+  });
+}
+async function ensureMqttLib() {
+  if (window.mqtt) return;
+  const errs = [];
+  for (const u of MQTT_LIBS) { try { await loadScript(u); if (window.mqtt) return; } catch (e) { errs.push(e.message); } }
+  throw new Error("Couldn't load the connection tool. " + errs.join('; '));
+}
+function topic(kind) { return 'device/' + S.device.id + '/' + kind; }
+function tryConnect(label, url) {
+  const t = getTokens();
+  return new Promise((resolve, reject) => {
+    let done = false, client;
+    const finish = (err) => {
+      if (done) return; done = true; clearTimeout(timer);
+      if (err) { S.mqttErrors.push(label + ': ' + err); try { client.end(true); } catch (e) {} reject(new Error(err)); }
+      else resolve(client);
+    };
+    const timer = setTimeout(() => finish('no answer after 15 seconds'), 15000);
+    try {
+      client = window.mqtt.connect(url, {
+        keepalive: 300, protocol: 'wss', reconnectPeriod: 0, clientId: 'DASH' + S.device.id,
+        username: S.device.id + '?x-amz-customauthorizer-name=' + AUTHORIZER, password: t.access_token
+      });
+    } catch (e) { finish(String(e && e.message || e)); return; }
+    client.on('connect', () => finish());
+    client.on('error', (e) => finish(String(e && e.message || e)));
+    client.on('close', () => finish('connection closed straight away'));
+  });
+}
+async function connectAndRead() {
+  const msg = $('connMsg'); msg.className = 'soft';
+  if (!tokenValid()) { showLogin('Your sign-in has run out. Please sign in again.'); return; }
+  if (!S.device) return;
+  $('connectBtn').disabled = true; msg.textContent = 'Connecting…';
+  resetConnection();
+  try {
+    await ensureMqttLib();
+    let client = null;
+    for (const [label, url] of [['as Yoto documents it', MQTT_URL], ['with the authorizer in the address', MQTT_URL + '?x-amz-customauthorizer-name=' + AUTHORIZER]]) {
+      msg.textContent = 'Connecting (' + label + ')…';
+      try { client = await tryConnect(label, url); S.mqttAttempt = label; break; } catch (e) { note('connect failed ' + label + ': ' + e.message); }
+    }
+    if (!client) throw new Error("Couldn't connect to Yoto's player server from this page. " + S.mqttErrors.join(' | '));
+    S.client = client; S.connected = true; S.lostWarned = false;
+    client.on('message', onMessage);
+    client.on('close', onClosed);
+    client.on('error', (e) => note('mqtt error: ' + (e && e.message || e)));
+    await new Promise((res, rej) => client.subscribe([topic('data/events'), topic('data/status'), topic('response')], (err) => err ? rej(err) : res()));
+    note('connected ' + S.mqttAttempt);
+    msg.textContent = 'Connected. Asking the player for its state…';
+    await readStatus(10000);
+    if (!S.status) throw new Error('Connected, but the player did not answer. Is it switched on and awake? Press a button on it, then try again.');
+    msg.className = 'good'; msg.textContent = 'Connected and the player answered.';
+  } catch (e) {
+    msg.className = 'err'; msg.textContent = e.message || String(e);
+    if (!S.status) { try { S.client && S.client.end(true); } catch (e2) {} S.client = null; S.connected = false; }
+  }
+  updateButtons();
+}
+function readStatus(waitMs) {
+  return new Promise((resolve) => {
+    if (!S.client || !S.connected) { resolve(null); return; }
+    const before = S.statusAt || 0;
+    S.client.publish(topic('command/status/request'), '');
+    const t0 = Date.now();
+    const iv = setInterval(() => {
+      if ((S.statusAt || 0) > before || Date.now() - t0 > waitMs) { clearInterval(iv); resolve((S.statusAt || 0) > before ? S.status : null); }
+    }, 100);
+  });
+}
+function onMessage(tp, buf) {
+  let p; try { p = JSON.parse(buf.toString()); } catch (e) { return; }
+  const kind = tp.split('/').slice(2).join('/');
+  if (kind === 'data/status' && p.status) {
+    S.status = p.status; S.statusAt = Date.now(); paintStatus();
+    if (S.run) S.run.lastStatusKB = p.status.freeDisk;
+  } else if (kind === 'response' && p.status) {
+    const key = Object.keys(p.status).find((k) => k !== 'req_body');
+    const val = key && p.status[key];
+    note('player reply: ' + key + ' ' + val);
+    if (key === 'card' && S.run) {
+      let what = ''; try { what = JSON.parse(p.status.req_body || '{}').uri ? 'start' : 'stop'; } catch (e) {}
+      if (what === 'start') { S.run.startReply = val; paintRun(); } else if (what === 'stop') S.run.stopReply = val;
+    }
+  } else if (kind === 'data/events') {
+    note('player event: ' + (p.playbackStatus || '?') + (p.source ? ' (' + p.source + ')' : '') + (p.cardId ? ' card ' + String(p.cardId).slice(0, 6) : ''));
+    if (S.run && p.playbackStatus === 'playing') S.run.sawPlaying = true;
+    if (S.run) S.run.lastEvent = p.playbackStatus;
+  }
+}
+function onClosed() {
+  S.connected = false;
+  if (S.run && S.run.started && !S.run.stopped && !S.lostWarned) {
+    S.lostWarned = true;
+    $('runMsg').className = 'err';
+    $('runMsg').textContent = 'The connection dropped while the card was playing! Pause the player using its own button now.';
+  }
+  updateButtons();
+}
+function resetConnection() {
+  clearTimers();
+  try { if (S.client) S.client.end(true); } catch (e) {}
+  S.client = null; S.connected = false; S.status = null; S.statusAt = 0; S.mqttErrors = []; S.run = null;
+  $('statTbl').hidden = true; $('s5').hidden = true; $('s6').hidden = true; $('connMsg').textContent = '';
+  for (const id of ['ck1', 'ck2', 'ck3']) $(id).checked = false;
+}
+function paintStatus() {
+  const s = S.status; if (!s) return;
+  $('statTbl').hidden = false;
+  $('stName').textContent = S.device ? S.device.name : '';
+  $('stPlay').textContent = s.playingStatus != null ? String(s.playingStatus) : 'unknown';
+  $('stCard').textContent = s.cardInserted === true ? 'Yes (take it out)' : (s.cardInserted === false ? 'No' : 'unknown');
+  $('stVol').textContent = s.volume != null ? String(s.volume) + ' / 100' : 'unknown';
+  $('stDisk').textContent = fmtKB(s.freeDisk);
+  updateButtons();
+}
+
+/* ---------- running the test ---------- */
+function updateButtons() {
+  $('connectBtn').disabled = !(S.device && S.card && tokenValid()) || (S.run && S.run.started && !S.run.stopped);
+  const probs = blockers(S.device, S.status);
+  const ready = S.connected && S.status && !probs.length && $('ck1').checked && $('ck2').checked && $('ck3').checked && S.card && !(S.run && S.run.started);
+  $('startBtn').disabled = !ready;
+  if (S.status && probs.length && S.connected) { $('connMsg').className = 'warn'; $('connMsg').textContent = probs.join(' '); }
+}
+function startCard() {
+  const probs = blockers(S.device, S.status);
+  if (!S.connected || !S.client || probs.length) { updateButtons(); return; }
+  if (!window.confirm('Start "' + S.card.title + '" on "' + S.device.name + '" now?\n\nIt will play for ' + PLAY_SECONDS + ' seconds, then stop.')) return;
+  const run = { started: Date.now(), stopped: false, startReply: null, stopReply: null, sawPlaying: false, readings: [], startKB: S.status.freeDisk, cardId: S.card.id };
+  run.readings.push({ at: 0, kb: typeof S.status.freeDisk === 'number' ? S.status.freeDisk : null, label: 'before start' });
+  S.run = run; S.lostWarned = false;
+  $('s5').hidden = false; $('s6').hidden = true; $('runMsg').className = 'soft'; $('runMsg').textContent = 'Sent. Waiting for the player…';
+  $('startBtn').disabled = true; $('connectBtn').disabled = true;
+  const payload = JSON.stringify({ uri: 'https://yoto.io/' + S.card.id });
+  note('sent card/start');
+  S.client.publish(topic('command/card/start'), payload, { qos: 1 });
+  let left = PLAY_SECONDS;
+  $('countdown').textContent = left + 's';
+  S.countdownTimer = setInterval(() => { left = Math.max(0, left - 1); $('countdown').textContent = left + 's'; }, 1000);
+  S.timers.push(setTimeout(() => stopCard('timer'), PLAY_SECONDS * 1000));
+  for (const sec of READ_AT) S.timers.push(setTimeout(() => takeReading(sec), sec * 1000));
+  paintRun();
+}
+function stopCard(why) {
+  const run = S.run;
+  clearInterval(S.countdownTimer); S.countdownTimer = null;
+  if (S.client && S.connected) {
+    try { S.client.publish(topic('command/card/stop'), '{}', { qos: 1 }); } catch (e) {}
+    S.timers.push(setTimeout(() => { try { if (S.client && S.connected) S.client.publish(topic('command/card/stop'), '{}', { qos: 1 }); } catch (e) {} }, 2000));
+    note('sent card/stop (' + why + ')');
+    $('runMsg').className = 'soft'; $('runMsg').textContent = 'Stop sent' + (why === 'button' ? ' (you pressed the button)' : '') + '.';
+  } else {
+    $('runMsg').className = 'err'; $('runMsg').textContent = 'Cannot reach the player from here. Pause it using its own button now.';
+  }
+  if (run && !run.stopped) { run.stopped = true; run.stoppedAt = Date.now(); }
+  $('countdown').textContent = 'Stopped';
+  $('stopBtn').textContent = 'Stop sent again';
+  $('s6').hidden = false;
+  paintResults(); updateButtons();
+}
+async function takeReading(sec) {
+  const run = S.run; if (!run) return;
+  const st = await readStatus(8000);
+  run.readings.push({ at: sec, kb: st && typeof st.freeDisk === 'number' ? st.freeDisk : null, label: sec + 's' });
+  paintResults();
+}
+function paintRun() {
+  const r = S.run; if (!r || S.lostWarned) return;
+  if (r.startReply === 'OK') { $('runMsg').className = 'good'; $('runMsg').textContent = 'The player replied OK to the start command.'; }
+  else if (r.startReply === 'FAIL') { $('runMsg').className = 'err'; $('runMsg').textContent = 'The player replied FAIL. It did not start the card.'; }
+}
+function paintResults() {
+  const r = S.run; if (!r) return;
+  $('s6').hidden = false;
+  const tbl = $('readTbl');
+  while (tbl.rows.length > 1) tbl.deleteRow(1);
+  const base = r.readings.find((x) => x.kb != null);
+  for (const x of r.readings) {
+    const row = tbl.insertRow();
+    row.insertCell().textContent = x.label;
+    row.insertCell().textContent = x.kb != null ? fmtKB(x.kb) : 'no answer';
+    row.insertCell().textContent = x.kb != null && base && x !== base ? describeChange(base.kb, x.kb) : '';
+  }
+  const v = verdictFrom({ started: !!r.started, startReply: r.startReply, sawPlaying: r.sawPlaying, readings: r.readings.map((x) => ({ kb: x.kb })) });
+  $('verdict').className = v.cls; $('verdict').textContent = v.text;
+  $('out').textContent = JSON.stringify(report(), null, 2);
+}
+function report() {
+  const r = S.run || {};
+  return {
+    version: VERSION, when: new Date().toISOString(), player: S.device ? { name: S.device.name, id: mask(S.device.id), type: S.device.type } : null,
+    card: S.card ? { title: S.card.title, id: S.card.id } : null, connectedVia: S.mqttAttempt, connectErrors: S.mqttErrors,
+    playSeconds: PLAY_SECONDS, startReply: r.startReply, stopReply: r.stopReply, sawPlayingEvent: r.sawPlaying,
+    freeSpaceKB: (r.readings || []).map((x) => ({ at: x.label, kb: x.kb })), lastStatus: S.status, log: S.log
+  };
+}
+async function rereadNow() {
+  const r = S.run; if (!r) return;
+  const sec = Math.round((Date.now() - r.started) / 1000);
+  $('rereadBtn').disabled = true;
+  const st = await readStatus(8000);
+  r.readings.push({ at: sec, kb: st && typeof st.freeDisk === 'number' ? st.freeDisk : null, label: sec + 's' });
+  paintResults(); $('rereadBtn').disabled = false;
+}
+async function copyResults() {
+  const text = JSON.stringify(report(), null, 2);
+  try { await navigator.clipboard.writeText(text); $('copyBtn').textContent = 'Copied ✓'; }
+  catch (e) { try { const rg = document.createRange(); rg.selectNodeContents($('out')); const s = getSelection(); s.removeAllRanges(); s.addRange(rg); $('copyBtn').textContent = 'Selected: press Copy on your keyboard'; } catch (e2) {} }
+  setTimeout(() => { $('copyBtn').textContent = 'Copy results'; }, 2500);
+}
+function disconnectNow() {
+  try { if (S.client) S.client.end(true); } catch (e) {}
+  S.client = null; S.connected = false; clearTimers();
+  $('doneBtn').textContent = 'Disconnected'; updateButtons();
+}
+
+/* ---------- wire up ---------- */
+function wire() {
+  $('secsTxt').textContent = String(PLAY_SECONDS);
+  $('idSave').addEventListener('click', () => {
+    const v = $('idInput').value.trim();
+    if (!/^[A-Za-z0-9_-]{10,}$/.test(v)) { showLogin('That does not look like a Client ID. Copy it again from the Yoto developer site.'); return; }
+    store('rt_clientid', v); showLogin();
+  });
+  $('loginBtn').addEventListener('click', startLogin);
+  $('cardSearch').addEventListener('input', renderCards);
+  $('connectBtn').addEventListener('click', connectAndRead);
+  for (const id of ['ck1', 'ck2', 'ck3']) $(id).addEventListener('change', updateButtons);
+  $('startBtn').addEventListener('click', startCard);
+  $('stopBtn').addEventListener('click', () => stopCard('button'));
+  $('rereadBtn').addEventListener('click', rereadNow);
+  $('copyBtn').addEventListener('click', copyResults);
+  $('doneBtn').addEventListener('click', disconnectNow);
+  $('restart').addEventListener('click', () => { resetConnection(); location.href = CONFIG.redirectUri; });
+  $('signOut').addEventListener('click', () => { resetConnection(); unstore('rt_tokens'); showLogin(); });
+  window.addEventListener('beforeunload', (e) => { if (S.run && S.run.started && !S.run.stopped) { e.preventDefault(); e.returnValue = ''; } });
+}
+
+(async function init() {
+  wire();
+  try { await handleCallback(); } catch (e) { showLogin(e.message); return; }
+  if (!tokenValid()) { showLogin(getTokens() ? 'Your sign-in has run out. Please sign in again.' : undefined); return; }
+  showApp();
+  loadChoices();
+})();
+</script>
+</body>
+</html>
