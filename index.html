@@ -98,6 +98,7 @@
     <label class="chk"><input type="checkbox" id="ck1"> <span>I turned the player's volume <b>right down</b> using the player's own buttons.</span></label>
     <label class="chk"><input type="checkbox" id="ck2"> <span>Willow is <b>not using</b> this player and nothing is playing on it.</span></label>
     <label class="chk"><input type="checkbox" id="ck3"> <span>I will keep this page open on screen until it says it's finished.</span></label>
+    <label class="chk" id="ck4row" hidden><input type="checkbox" id="ck4"> <span>I can see the player is <b>idle</b> and has <b>no card</b> in it. (This page cannot check that for this player.)</span></label>
     <p class="soft">The card plays for <b id="secsTxt">20</b> seconds, then this page stops it. The big red button stops it at any time.</p>
     <div class="row"><button id="startBtn" class="pri" disabled>Start the card</button></div>
   </div>
@@ -130,7 +131,7 @@
 <script>
 'use strict';
 
-const VERSION = 'v2: longer wait for the player, diagnostics box';
+const VERSION = 'v3: can run without the player state report';
 const PLAY_SECONDS = 20;                  // how long the card plays before the page stops it
 const READ_AT = [10, 30, 60, 120];        // seconds after starting: read the player's free space again
 const MQTT_URL = 'wss://aqrphjqbp3u2z-ats.iot.eu-west-2.amazonaws.com/mqtt';
@@ -168,12 +169,14 @@ function fmtKB(kb) {
   return mb >= 1024 ? (mb / 1024).toFixed(2) + ' GB' : mb.toFixed(1) + ' MB';
 }
 // Which reasons stop us from starting. Returns a list of plain-words problems (empty = fine to go).
-function blockers(device, status) {
+function blockers(device, status, noStatusMode, lastEvent) {
   const out = [];
   if (!device) out.push('Choose a player first.');
   else if (device.online === false) out.push('The player says it is offline. Switch it on and check its Wi-Fi.');
-  if (!status) out.push('The player has not reported its state yet.');
-  else {
+  if (!status) {
+    if (!noStatusMode) out.push('The player has not reported its state yet.');
+    else if (lastEvent && String(lastEvent.playbackStatus || '').toLowerCase() === 'playing') out.push('The player says it is playing something right now. Pause it first.');
+  } else {
     if (String(status.playingStatus || '').toLowerCase() === 'playing') out.push('The player is playing something right now. Pause it first.');
     if (status.cardInserted === true) out.push('There is a card in the player. Take it out first.');
   }
@@ -371,13 +374,20 @@ async function connectAndRead() {
     client.on('message', onMessage);
     client.on('close', onClosed);
     client.on('error', (e) => note('mqtt error: ' + (e && e.message || e)));
-    await new Promise((res, rej) => client.subscribe([topic('data/events'), topic('data/status'), topic('response')], (err, granted) => { note('subscribed: ' + JSON.stringify(granted || null)); err ? rej(err) : res(); }));
+    await new Promise((res, rej) => client.subscribe([topic('data/events'), topic('data/status'), topic('response')], (err, granted) => { note('subscribed: ' + (granted || []).map((g) => g.topic.split('/').slice(2).join('/') + ' qos' + g.qos).join(', ')); err ? rej(err) : res(); }));
     try { client.publish(topic('command/events/request'), '{}'); note('asked for events'); } catch (e) {}
     note('connected ' + S.mqttAttempt);
     msg.textContent = 'Connected. Asking the player for its state (can take up to 25 seconds)…';
     await readStatus(25000);
-    if (!S.status) throw new Error('Connected, but the player did not answer. Is it switched on and awake? Press a button on it, then try again.');
-    msg.className = 'good'; msg.textContent = 'Connected and the player answered.';
+    if (!S.status && S.acked) {
+      S.noStatusMode = true; $('ck4row').hidden = false;
+      msg.className = 'warn';
+      msg.textContent = "Connected, and the player accepts commands, but it does not send its state report. The test can still run. This page just can't read free space or check what the player is doing, so you do that yourself (see box 4).";
+    } else if (!S.status) {
+      throw new Error('Connected, but the player did not answer. Is it switched on and awake? Press a button on it, then try again.');
+    } else {
+      msg.className = 'good'; msg.textContent = 'Connected and the player answered.';
+    }
   } catch (e) {
     msg.className = 'err'; msg.textContent = (e.message || String(e)) + (S.device ? ' (Yoto\'s player list says online: ' + S.device.online + '.)' : '');
     if (!S.status) { try { S.client && S.client.end(true); } catch (e2) {} S.client = null; S.connected = false; }
@@ -404,7 +414,7 @@ function readStatus(waitMs) {
 function onMessage(tp, buf) {
   let p; try { p = JSON.parse(buf.toString()); } catch (e) { return; }
   const kind = tp.split('/').slice(2).join('/');
-  note('message on ' + kind);
+  note('message on ' + kind + ': ' + buf.toString().slice(0, 300));
   if (kind === 'data/status' && p.status) {
     S.status = p.status; S.statusAt = Date.now(); paintStatus();
     if (S.run) S.run.lastStatusKB = p.status.freeDisk;
@@ -412,11 +422,13 @@ function onMessage(tp, buf) {
     const key = Object.keys(p.status).find((k) => k !== 'req_body');
     const val = key && p.status[key];
     note('player reply: ' + key + ' ' + val);
+    if (key === 'status' && val === 'OK') S.acked = true;
     if (key === 'card' && S.run) {
       let what = ''; try { what = JSON.parse(p.status.req_body || '{}').uri ? 'start' : 'stop'; } catch (e) {}
       if (what === 'start') { S.run.startReply = val; paintRun(); } else if (what === 'stop') S.run.stopReply = val;
     }
   } else if (kind === 'data/events') {
+    S.lastEvent = p;
     note('player event: ' + (p.playbackStatus || '?') + (p.source ? ' (' + p.source + ')' : '') + (p.cardId ? ' card ' + String(p.cardId).slice(0, 6) : ''));
     if (S.run && p.playbackStatus === 'playing') S.run.sawPlaying = true;
     if (S.run) S.run.lastEvent = p.playbackStatus;
@@ -435,8 +447,9 @@ function resetConnection() {
   clearTimers();
   try { if (S.client) S.client.end(true); } catch (e) {}
   S.client = null; S.connected = false; S.status = null; S.statusAt = 0; S.mqttErrors = []; S.run = null;
+  S.noStatusMode = false; S.acked = false; S.lastEvent = null; $('ck4row').hidden = true;
   $('statTbl').hidden = true; $('s5').hidden = true; $('s6').hidden = true; $('connMsg').textContent = '';
-  for (const id of ['ck1', 'ck2', 'ck3']) $(id).checked = false;
+  for (const id of ['ck1', 'ck2', 'ck3', 'ck4']) $(id).checked = false;
 }
 function paintStatus() {
   const s = S.status; if (!s) return;
@@ -452,17 +465,17 @@ function paintStatus() {
 /* ---------- running the test ---------- */
 function updateButtons() {
   $('connectBtn').disabled = !(S.device && S.card && tokenValid()) || (S.run && S.run.started && !S.run.stopped);
-  const probs = blockers(S.device, S.status);
-  const ready = S.connected && S.status && !probs.length && $('ck1').checked && $('ck2').checked && $('ck3').checked && S.card && !(S.run && S.run.started);
+  const probs = blockers(S.device, S.status, S.noStatusMode, S.lastEvent);
+  const ready = S.connected && (S.status || S.noStatusMode) && !probs.length && $('ck1').checked && $('ck2').checked && $('ck3').checked && (!S.noStatusMode || $('ck4').checked) && S.card && !(S.run && S.run.started);
   $('startBtn').disabled = !ready;
-  if (S.status && probs.length && S.connected) { $('connMsg').className = 'warn'; $('connMsg').textContent = probs.join(' '); }
+  if ((S.status || S.noStatusMode) && probs.length && S.connected) { $('connMsg').className = 'warn'; $('connMsg').textContent = probs.join(' '); }
 }
 function startCard() {
-  const probs = blockers(S.device, S.status);
+  const probs = blockers(S.device, S.status, S.noStatusMode, S.lastEvent);
   if (!S.connected || !S.client || probs.length) { updateButtons(); return; }
   if (!window.confirm('Start "' + S.card.title + '" on "' + S.device.name + '" now?\n\nIt will play for ' + PLAY_SECONDS + ' seconds, then stop.')) return;
-  const run = { started: Date.now(), stopped: false, startReply: null, stopReply: null, sawPlaying: false, readings: [], startKB: S.status.freeDisk, cardId: S.card.id };
-  run.readings.push({ at: 0, kb: typeof S.status.freeDisk === 'number' ? S.status.freeDisk : null, label: 'before start' });
+  const run = { started: Date.now(), stopped: false, startReply: null, stopReply: null, sawPlaying: false, readings: [], startKB: S.status ? S.status.freeDisk : null, cardId: S.card.id };
+  run.readings.push({ at: 0, kb: S.status && typeof S.status.freeDisk === 'number' ? S.status.freeDisk : null, label: 'before start' });
   S.run = run; S.lostWarned = false;
   $('s5').hidden = false; $('s6').hidden = true; $('runMsg').className = 'soft'; $('runMsg').textContent = 'Sent. Waiting for the player…';
   $('startBtn').disabled = true; $('connectBtn').disabled = true;
@@ -473,7 +486,7 @@ function startCard() {
   $('countdown').textContent = left + 's';
   S.countdownTimer = setInterval(() => { left = Math.max(0, left - 1); $('countdown').textContent = left + 's'; }, 1000);
   S.timers.push(setTimeout(() => stopCard('timer'), PLAY_SECONDS * 1000));
-  for (const sec of READ_AT) S.timers.push(setTimeout(() => takeReading(sec), sec * 1000));
+  if (!S.noStatusMode) for (const sec of READ_AT) S.timers.push(setTimeout(() => takeReading(sec), sec * 1000));
   paintRun();
 }
 function stopCard(why) {
@@ -517,7 +530,8 @@ function paintResults() {
     row.insertCell().textContent = x.kb != null && base && x !== base ? describeChange(base.kb, x.kb) : '';
   }
   const v = verdictFrom({ started: !!r.started, startReply: r.startReply, sawPlaying: r.sawPlaying, readings: r.readings.map((x) => ({ kb: x.kb })) });
-  $('verdict').className = v.cls; $('verdict').textContent = v.text;
+  $('verdict').className = v.cls; $('verdict').textContent = v.text + (S.noStatusMode ? " This player doesn't report its free space, so the signal is the Yoto app's Audio download status screen, and Library Check tomorrow." : '');
+  $('readTbl').hidden = !!S.noStatusMode; $('rereadBtn').hidden = !!S.noStatusMode;
   $('out').textContent = JSON.stringify(report(), null, 2);
 }
 function report() {
@@ -526,7 +540,7 @@ function report() {
     version: VERSION, when: new Date().toISOString(), player: S.device ? { name: S.device.name, id: mask(S.device.id), type: S.device.type } : null,
     card: S.card ? { title: S.card.title, id: S.card.id } : null, connectedVia: S.mqttAttempt, connectErrors: S.mqttErrors,
     playSeconds: PLAY_SECONDS, startReply: r.startReply, stopReply: r.stopReply, sawPlayingEvent: r.sawPlaying,
-    freeSpaceKB: (r.readings || []).map((x) => ({ at: x.label, kb: x.kb })), lastStatus: S.status, log: S.log
+    freeSpaceKB: (r.readings || []).map((x) => ({ at: x.label, kb: x.kb })), lastStatus: S.status, noStatusMode: !!S.noStatusMode, lastEvent: S.lastEvent || null, log: S.log
   };
 }
 async function rereadNow() {
@@ -566,7 +580,7 @@ function wire() {
     catch (e) { try { const rg = document.createRange(); rg.selectNodeContents($('connDbg')); const s = getSelection(); s.removeAllRanges(); s.addRange(rg); $('dbgCopy').textContent = 'Selected: press Copy on your keyboard'; } catch (e2) {} }
     setTimeout(() => { $('dbgCopy').textContent = 'Copy diagnostics'; }, 2500);
   });
-  for (const id of ['ck1', 'ck2', 'ck3']) $(id).addEventListener('change', updateButtons);
+  for (const id of ['ck1', 'ck2', 'ck3', 'ck4']) $(id).addEventListener('change', updateButtons);
   $('startBtn').addEventListener('click', startCard);
   $('stopBtn').addEventListener('click', () => stopCard('button'));
   $('rereadBtn').addEventListener('click', rereadNow);
