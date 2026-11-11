@@ -9,6 +9,7 @@
   :root { --bg:#eef3f2; --ink:#1f2d2b; --soft:#5c6e6b; --accent:#0f8b7d; --accent-dark:#0a665c; --card:#fff; --line:#c9d9d6; --bad:#b3261e; --good:#2e7d32; --warn:#a35c00; }
   * { box-sizing: border-box; }
   [hidden] { display:none !important; }
+  .running #s1, .running #s2 { pointer-events:none; opacity:.55; }
   body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif; }
   main { max-width:680px; margin:0 auto; padding:max(env(safe-area-inset-top),14px) 14px 60px; }
   h1 { margin:6px 0 2px; font-size:1.5rem; }
@@ -77,8 +78,8 @@
 
   <div class="panel" id="s3">
     <h2>3. Check the player</h2>
-    <p class="soft">Reads the player's current state (nothing is played). Needs the player to be switched on and online.</p>
-    <div class="row"><button id="connectBtn" class="pri" disabled>Connect and read player</button></div>
+    <p class="soft">Asks the player what it is doing (nothing is played). The connection to the player closes itself after a few seconds here, which is expected: the page opens a fresh one when you press Start.</p>
+    <div class="row"><button id="connectBtn" class="pri" disabled>Check the player</button></div>
     <p id="connMsg" class="soft"></p>
     <details><summary class="soft">Diagnostics (if something goes wrong)</summary>
       <div class="row"><button id="dbgCopy">Copy diagnostics</button></div>
@@ -98,7 +99,6 @@
     <label class="chk"><input type="checkbox" id="ck1"> <span>I turned the player's volume <b>right down</b> using the player's own buttons.</span></label>
     <label class="chk"><input type="checkbox" id="ck2"> <span>Willow is <b>not using</b> this player and nothing is playing on it.</span></label>
     <label class="chk"><input type="checkbox" id="ck3"> <span>I will keep this page open on screen until it says it's finished.</span></label>
-    <label class="chk" id="ck4row" hidden><input type="checkbox" id="ck4"> <span>I can see the player is <b>idle</b> and has <b>no card</b> in it. (This page cannot check that for this player.)</span></label>
     <p class="soft">The card plays for <b id="secsTxt">20</b> seconds, then this page stops it. The big red button stops it at any time.</p>
     <div class="row"><button id="startBtn" class="pri" disabled>Start the card</button></div>
     <p id="whyNo" class="warn"></p>
@@ -109,13 +109,15 @@
     <div class="big" id="countdown"></div>
     <button id="stopBtn" class="stop">STOP NOW</button>
     <p id="runMsg" class="soft"></p>
+    <p id="runMsg2" class="soft"></p>
+    <div class="row"><button id="manualBtn" hidden>I paused it myself</button></div>
   </div>
 
   <div class="panel" id="s6" hidden>
     <h2>Results</h2>
     <p id="verdict"></p>
     <table id="readTbl"><tr><th>When</th><th>Free space</th><th>Change</th></tr></table>
-    <p class="soft">Now look at the Yoto app: <b>Settings → My Players → the big Yoto → Audio download status</b>. Does the card show as waiting or downloading?</p>
+    <p class="soft">Now look at the Yoto app: <b>Settings → My Players → the player you tested → Audio download status</b>. Does the card show as waiting or downloading?</p>
     <div class="row">
       <button id="rereadBtn">Read free space again</button>
       <button id="copyBtn">Copy results</button>
@@ -132,9 +134,12 @@
 <script>
 'use strict';
 
-const VERSION = 'v4: shows why Start is blocked, ignores stale closes';
+const VERSION = 'v5: short-lived connections, reconnect-to-stop with confirmation';
 const PLAY_SECONDS = 20;                  // how long the card plays before the page stops it
-const READ_AT = [10, 30, 60, 120];        // seconds after starting: read the player's free space again
+const STATE_WAIT_MS = 6000;   // how long to wait for the player to say what it is doing
+const EXTRA_WAIT_MS = 800;    // after the first report, wait a moment for a second kind of report
+const STOP_WAIT_MS = 3000;    // how long to wait for the player to confirm Stop before trying again
+const HOLD_SECONDS = 12;      // 'Check the player' watches the connection for this long
 const MQTT_URL = 'wss://aqrphjqbp3u2z-ats.iot.eu-west-2.amazonaws.com/mqtt';
 const AUTHORIZER = 'PublicJWTAuthorizer';
 const MQTT_LIBS = ['https://cdn.jsdelivr.net/npm/mqtt@5.10.1/dist/mqtt.min.js', 'https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js'];
@@ -170,17 +175,16 @@ function fmtKB(kb) {
   return mb >= 1024 ? (mb / 1024).toFixed(2) + ' GB' : mb.toFixed(1) + ' MB';
 }
 // Which reasons stop us from starting. Returns a list of plain-words problems (empty = fine to go).
-function blockers(device, status, noStatusMode, lastEvent) {
+// Reasons not to start. Returns a list of plain-words problems (empty = player looks idle).
+function stateProblems(device, status, event) {
   const out = [];
-  if (!device) out.push('Choose a player first.');
-  else if (device.online === false) out.push('The player says it is offline. Switch it on and check its Wi-Fi.');
-  if (!status) {
-    if (!noStatusMode) out.push('The player has not reported its state yet.');
-    else if (lastEvent && String(lastEvent.playbackStatus || '').toLowerCase() === 'playing') out.push('The player says it is playing something right now. Pause it first.');
-  } else {
-    if (String(status.playingStatus || '').toLowerCase() === 'playing') out.push('The player is playing something right now. Pause it first.');
-    if (status.cardInserted === true) out.push('There is a card in the player. Take it out first.');
-  }
+  if (!device) { out.push('Choose a player first.'); return out; }
+  if (device.online === false) out.push('The player says it is offline. Switch it on and check its Wi-Fi.');
+  if (!status && !event) { out.push("The player did not say what it is doing, so this page can't tell it is idle. Press a button on it to wake it, then try again."); return out; }
+  const playing = (status && String(status.playingStatus || '').toLowerCase() === 'playing') || (event && String(event.playbackStatus || '').toLowerCase() === 'playing');
+  if (playing) out.push('The player is playing something right now. Pause it first.');
+  if (status && status.cardInserted === true) out.push('There is a card in the player. Take it out first.');
+  if (event && event.cardId && String(event.cardId).toLowerCase() !== 'none') out.push('The player has a card loaded (' + String(event.cardId).slice(0, 8) + '). Stop it and take any card out first.');
   return out;
 }
 function describeChange(before, after) {
@@ -245,7 +249,7 @@ async function handleCallback() {
   store('rt_tokens', JSON.stringify({ access_token: t.access_token, exp: Date.now() + (t.expires_in || 600) * 1000 }));
 }
 function getTokens() { try { return JSON.parse(fetchStored('rt_tokens') || 'null'); } catch (e) { return null; } }
-function tokenValid() { const t = getTokens(); return !!(t && t.access_token && Date.now() < t.exp - 20000); }
+function tokenValid(margin) { const t = getTokens(); return !!(t && t.access_token && Date.now() < t.exp - (margin == null ? 20000 : margin)); }
 async function api(path) {
   const t = getTokens();
   if (!t || !tokenValid()) throw new Error('signin');
@@ -300,7 +304,7 @@ function renderDevices() {
   for (const d of S.devices) {
     const r = el('input', { type: 'radio', name: 'dev' });
     r.checked = S.device && S.device.id === d.id;
-    r.addEventListener('change', () => { S.device = d; resetConnection(); updateButtons(); });
+    r.addEventListener('change', () => { if (running() || S.starting || S.checking) { renderDevices(); return; } S.device = d; resetConnection(); updateButtons(); });
     box.append(el('label', { class: 'pick' }, r, el('span', {}, d.name + ' ' + (d.online ? '(online)' : '(offline)'))));
   }
 }
@@ -357,194 +361,251 @@ function tryConnect(label, url) {
     client.on('close', () => finish('connection closed straight away'));
   });
 }
-async function connectAndRead() {
-  const msg = $('connMsg'); msg.className = 'soft';
+S.closeAfter = []; S.stateSeq = 0;
+function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+function setRun(cls, text) { $('runMsg').className = cls; $('runMsg').textContent = text; }
+function setRun2(cls, text) { $('runMsg2').className = cls; $('runMsg2').textContent = text; }
+function running() { return !!(S.run && S.run.started && !S.run.stopped); }
+
+function closeClient() {
+  const old = S.client; S.client = null; S.connected = false;
+  if (old) { try { old.end(true); } catch (e) {} }
+}
+// Opens a brand-new connection to the player server (the connection only lives a few seconds here, so we open one whenever we need one).
+async function openConnection() {
+  const t = getTokens();
+  if (!t || !t.access_token) throw new Error('signin');
+  await ensureMqttLib();
+  closeClient();
+  S.status = null; S.lastEvent = null; S.mqttErrors = [];
+  let client = null;
+  for (const [label, url] of [['as Yoto documents it', MQTT_URL], ['with the authorizer in the address', MQTT_URL + '?x-amz-customauthorizer-name=' + AUTHORIZER]]) {
+    try { client = await tryConnect(label, url); S.mqttAttempt = label; break; } catch (e) { note('connect failed ' + label + ': ' + e.message); }
+  }
+  if (!client) throw new Error("Couldn't connect to Yoto's player server from this page. " + S.mqttErrors.join(' | '));
+  S.client = client; S.connected = true; S.lost = false; S.connectedAt = Date.now();
+  client.on('message', onMessage);
+  client.on('close', () => onClosed(client));
+  client.on('error', (e) => note('mqtt error: ' + (e && e.message || e)));
+  try {
+    const sock = client.stream && client.stream.socket;
+    if (sock && sock.addEventListener) sock.addEventListener('close', (ev) => note('websocket closed: code ' + ev.code + (ev.reason ? ', reason "' + ev.reason + '"' : '') + (ev.wasClean ? ' (clean)' : ' (not clean)')));
+  } catch (e) {}
+  const sub = new Promise((res, rej) => client.subscribe([topic('data/events'), topic('data/status'), topic('response')], (err, granted) => {
+    note('subscribed: ' + (granted || []).map((g) => g.topic.split('/').slice(2).join('/') + ' qos' + g.qos).join(', ')); err ? rej(err) : res();
+  }));
+  await Promise.race([sub, sleep(8000).then(() => { throw new Error('subscribing timed out'); })]);
+  note('connected ' + S.mqttAttempt);
+  return client;
+}
+// Asks the player what it is doing, once, and waits for whichever report comes back first.
+async function askState(waitMs) {
+  const before = S.stateSeq;
+  try {
+    S.client.publish(topic('command/events/request'), '{}');
+    S.client.publish(topic('command/status/request'), '');
+    note('asked for state');
+  } catch (e) { note('could not ask: ' + e.message); }
+  const t0 = Date.now();
+  while (S.stateSeq === before && Date.now() - t0 < waitMs && S.connected) await sleep(100);
+  if (S.stateSeq > before) await sleep(EXTRA_WAIT_MS);
+  return { status: S.status, event: S.lastEvent };
+}
+function paintState(status, event) {
+  if (!status && !event) { $('statTbl').hidden = true; return; }
+  $('statTbl').hidden = false;
+  const cid = event && event.cardId != null ? String(event.cardId) : '';
+  const active = cid && cid.toLowerCase() !== 'none';
+  $('stName').textContent = S.device ? S.device.name : '';
+  $('stPlay').textContent = status && status.playingStatus != null ? String(status.playingStatus)
+    : (event && event.playbackStatus ? String(event.playbackStatus) : (event ? (active ? 'a card is loaded' : 'nothing playing') : 'unknown'));
+  $('stCard').textContent = status && status.cardInserted === true ? 'Yes (take it out)' : (active ? 'Loaded: ' + cid.slice(0, 8) : 'None');
+  $('stVol').textContent = event && event.volume != null ? event.volume + ' / ' + (event.volumeMax || 100) : (status && status.volume != null ? status.volume + ' / 100' : 'unknown');
+  $('stDisk').textContent = status && status.freeDisk != null ? fmtKB(status.freeDisk) : 'not reported by this player';
+}
+async function checkPlayer() {
+  if (running() || S.starting || S.checking) return;
+  const msg = $('connMsg');
   if (!tokenValid()) { showLogin('Your sign-in has run out. Please sign in again.'); return; }
   if (!S.device) return;
-  $('connectBtn').disabled = true; msg.textContent = 'Connecting…';
-  resetConnection();
+  if (!resetConnection()) return;
+  S.checking = true; $('connectBtn').disabled = true; msg.className = 'soft'; msg.textContent = 'Connecting…';
   try {
-    await ensureMqttLib();
-    let client = null;
-    for (const [label, url] of [['as Yoto documents it', MQTT_URL], ['with the authorizer in the address', MQTT_URL + '?x-amz-customauthorizer-name=' + AUTHORIZER]]) {
-      msg.textContent = 'Connecting (' + label + ')…';
-      try { client = await tryConnect(label, url); S.mqttAttempt = label; break; } catch (e) { note('connect failed ' + label + ': ' + e.message); }
-    }
-    if (!client) throw new Error("Couldn't connect to Yoto's player server from this page. " + S.mqttErrors.join(' | '));
-    S.client = client; S.connected = true; S.lostWarned = false;
-    client.on('message', onMessage);
-    client.on('close', () => onClosed(client));
-    client.on('error', (e) => note('mqtt error: ' + (e && e.message || e)));
-    await new Promise((res, rej) => client.subscribe([topic('data/events'), topic('data/status'), topic('response')], (err, granted) => { note('subscribed: ' + (granted || []).map((g) => g.topic.split('/').slice(2).join('/') + ' qos' + g.qos).join(', ')); err ? rej(err) : res(); }));
-    try { client.publish(topic('command/events/request'), '{}'); note('asked for events'); } catch (e) {}
-    note('connected ' + S.mqttAttempt);
-    msg.textContent = 'Connected. Asking the player for its state (can take up to 25 seconds)…';
-    await readStatus(25000);
-    if (!S.status && S.acked) {
-      S.noStatusMode = true; $('ck4row').hidden = false;
-      msg.className = 'warn';
-      msg.textContent = "Connected, and the player accepts commands, but it does not send its state report. The test can still run. This page just can't read free space or check what the player is doing, so you do that yourself (see box 4).";
-    } else if (!S.status) {
-      throw new Error('Connected, but the player did not answer. Is it switched on and awake? Press a button on it, then try again.');
-    } else {
-      msg.className = 'good'; msg.textContent = 'Connected and the player answered.';
+    await openConnection();
+    msg.textContent = 'Connected. Asking the player what it is doing…';
+    const st = await askState(STATE_WAIT_MS);
+    paintState(st.status, st.event);
+    const probs = stateProblems(S.device, st.status, st.event);
+    if (probs.length) { msg.className = 'warn'; msg.textContent = probs.join(' '); }
+    else {
+      msg.className = 'good'; msg.textContent = 'The player is awake and idle. Watching the connection…';
+      const t0 = Date.now();
+      while (S.connected && Date.now() - t0 < HOLD_SECONDS * 1000) await sleep(200);
+      msg.textContent = S.connected ? 'The player is awake and idle. The connection stayed open for ' + HOLD_SECONDS + ' seconds.'
+        : 'The player is awake and idle. The connection to it closed by itself after ' + S.closeAfter[S.closeAfter.length - 1] + ' seconds. The page reconnects when you press Start.';
     }
   } catch (e) {
-    msg.className = 'err'; msg.textContent = (e.message || String(e)) + (S.device ? ' (Yoto\'s player list says online: ' + S.device.online + '.)' : '');
-    if (!S.status) { try { S.client && S.client.end(true); } catch (e2) {} S.client = null; S.connected = false; }
+    if (e.message === 'signin') showLogin('Your sign-in has run out. Please sign in again.');
+    else { msg.className = 'err'; msg.textContent = (e.message || String(e)) + (S.device ? " (Yoto's player list says online: " + S.device.online + '.)' : ''); }
   }
-  paintDbg(); updateButtons();
+  S.checking = false; closeClient(); paintDbg(); updateButtons();
 }
 function paintDbg() {
   $('connDbg').textContent = JSON.stringify({ version: VERSION, player: S.device ? { name: S.device.name, id: mask(S.device.id), onlineInYotoList: S.device.online, type: S.device.type } : null,
-    connectedVia: S.mqttAttempt, connectErrors: S.mqttErrors, gotStatus: !!S.status, log: S.log }, null, 2);
-}
-function readStatus(waitMs) {
-  return new Promise((resolve) => {
-    if (!S.client || !S.connected) { resolve(null); return; }
-    const before = S.statusAt || 0;
-    const ask = () => { try { S.client.publish(topic('command/status/request'), ''); note('asked for status'); } catch (e) { note('could not ask: ' + e.message); } };
-    ask();
-    const t0 = Date.now(); let asks = 1;
-    const iv = setInterval(() => {
-      if ((S.statusAt || 0) > before || Date.now() - t0 > waitMs) { clearInterval(iv); resolve((S.statusAt || 0) > before ? S.status : null); return; }
-      if (Date.now() - t0 > asks * 5000) { asks++; ask(); }
-    }, 100);
-  });
+    connectedVia: S.mqttAttempt, connectErrors: S.mqttErrors, connectionLifetimesSeconds: S.closeAfter, log: S.log }, null, 2);
 }
 function onMessage(tp, buf) {
   let p; try { p = JSON.parse(buf.toString()); } catch (e) { return; }
   const kind = tp.split('/').slice(2).join('/');
   note('message on ' + kind + ': ' + buf.toString().slice(0, 300));
   if (kind === 'data/status' && p.status) {
-    S.status = p.status; S.statusAt = Date.now(); paintStatus();
-    if (S.run) S.run.lastStatusKB = p.status.freeDisk;
+    S.status = p.status; S.stateSeq++;
   } else if (kind === 'response' && p.status) {
     const key = Object.keys(p.status).find((k) => k !== 'req_body');
     const val = key && p.status[key];
     note('player reply: ' + key + ' ' + val);
-    if (key === 'status' && val === 'OK') S.acked = true;
     if (key === 'card' && S.run) {
       let what = ''; try { what = JSON.parse(p.status.req_body || '{}').uri ? 'start' : 'stop'; } catch (e) {}
       if (what === 'start') { S.run.startReply = val; paintRun(); } else if (what === 'stop') S.run.stopReply = val;
     }
   } else if (kind === 'data/events') {
-    S.lastEvent = p;
+    S.lastEvent = p; S.stateSeq++;
     note('player event: ' + (p.playbackStatus || '?') + (p.source ? ' (' + p.source + ')' : '') + (p.cardId ? ' card ' + String(p.cardId).slice(0, 6) : ''));
     if (S.run && p.playbackStatus === 'playing') S.run.sawPlaying = true;
-    if (S.run) S.run.lastEvent = p.playbackStatus;
   }
 }
 function onClosed(c) {
   if (c !== S.client) return;            // a connection we already replaced or ended on purpose
-  S.connected = false; S.lost = true;
-  note('connection closed');
-  if (!(S.run && S.run.started)) { $('connMsg').className = 'err'; $('connMsg').textContent = 'The connection to the player closed. Press "Connect and read player" again.'; }
-  if (S.run && S.run.started && !S.run.stopped && !S.lostWarned) {
-    S.lostWarned = true;
-    $('runMsg').className = 'err';
-    $('runMsg').textContent = 'The connection dropped while the card was playing! Pause the player using its own button now.';
-  }
+  const secs = Number(((Date.now() - (S.connectedAt || Date.now())) / 1000).toFixed(1));
+  S.connected = false; S.lost = true; S.closeAfter.push(secs);
+  note('connection closed by itself after ' + secs + 's');
+  if (running() && !S.run.stopping) setRun2('warn', 'The connection to the player closed (it does this after a few seconds). The page will reconnect to send Stop.');
   updateButtons();
 }
+// Returns false (and does nothing) while a card is running or starting.
 function resetConnection() {
-  clearTimers();
-  try { if (S.client) S.client.end(true); } catch (e) {}
-  S.client = null; S.connected = false; S.status = null; S.statusAt = 0; S.mqttErrors = []; S.run = null;
-  S.lost = false; S.noStatusMode = false; S.acked = false; S.lastEvent = null; $('ck4row').hidden = true;
-  $('statTbl').hidden = true; $('s5').hidden = true; $('s6').hidden = true; $('connMsg').textContent = '';
-  for (const id of ['ck1', 'ck2', 'ck3', 'ck4']) $(id).checked = false;
-}
-function paintStatus() {
-  const s = S.status; if (!s) return;
-  $('statTbl').hidden = false;
-  $('stName').textContent = S.device ? S.device.name : '';
-  $('stPlay').textContent = s.playingStatus != null ? String(s.playingStatus) : 'unknown';
-  $('stCard').textContent = s.cardInserted === true ? 'Yes (take it out)' : (s.cardInserted === false ? 'No' : 'unknown');
-  $('stVol').textContent = s.volume != null ? String(s.volume) + ' / 100' : 'unknown';
-  $('stDisk').textContent = fmtKB(s.freeDisk);
-  updateButtons();
+  if (running() || S.starting || S.checking) return false;
+  clearTimers(); closeClient();
+  S.status = null; S.lastEvent = null; S.stateSeq = 0; S.mqttErrors = []; S.run = null; S.lost = false;
+  $('statTbl').hidden = true; $('s5').hidden = true; $('s6').hidden = true; $('connMsg').textContent = ''; $('manualBtn').hidden = true;
+  document.body.classList.remove('running');
+  for (const id of ['ck1', 'ck2', 'ck3']) $(id).checked = false;
+  return true;
 }
 
 /* ---------- running the test ---------- */
 function updateButtons() {
-  $('connectBtn').disabled = !(S.device && S.card && tokenValid()) || (S.run && S.run.started && !S.run.stopped);
-  const probs = blockers(S.device, S.status, S.noStatusMode, S.lastEvent);
-  const ready = S.connected && (S.status || S.noStatusMode) && !probs.length && $('ck1').checked && $('ck2').checked && $('ck3').checked && (!S.noStatusMode || $('ck4').checked) && S.card && !(S.run && S.run.started);
+  const busy = running() || !!S.starting || !!S.checking;
+  $('connectBtn').disabled = !(S.device && S.card && tokenValid()) || busy;
+  const ticked = $('ck1').checked && $('ck2').checked && $('ck3').checked;
+  const ready = !!(S.device && S.card && tokenValid(90000) && ticked && !busy);
   $('startBtn').disabled = !ready;
   let why = '';
-  if (!ready && !(S.run && S.run.started)) {
-    if (!S.card) why = 'Choose a card in box 2.';
-    else if (!S.client || !S.connected) why = S.lost ? 'The connection to the player has closed. Press "Connect and read player" again.' : 'Press "Connect and read player" first.';
-    else if (!(S.status || S.noStatusMode)) why = 'Waiting for the player to answer.';
-    else if (probs.length) why = probs.join(' ');
-    else why = 'Tick all the boxes above' + (S.noStatusMode ? ' (all four).' : '.');
+  if (!ready && !busy) {
+    if (!S.device) why = 'Choose a player in box 1.';
+    else if (!S.card) why = 'Choose a card in box 2.';
+    else if (!tokenValid(90000)) why = 'Your sign-in is about to run out. Press "Start again" and sign in.';
+    else why = 'Tick all three boxes above.';
   }
   $('whyNo').textContent = why;
-  if ((S.status || S.noStatusMode) && probs.length && S.connected) { $('connMsg').className = 'warn'; $('connMsg').textContent = probs.join(' '); }
 }
-function startCard() {
-  const probs = blockers(S.device, S.status, S.noStatusMode, S.lastEvent);
-  if (!S.connected || !S.client || probs.length) { updateButtons(); return; }
+function endAbort(text) {
+  setRun('err', text);
+  $('countdown').textContent = 'Not started';
+  $('stopBtn').disabled = true;
+  closeClient(); S.starting = false; S.run = null;
+  document.body.classList.remove('running');
+  paintDbg(); updateButtons();
+}
+async function startCard() {
+  if (running() || S.starting || S.checking) return;
+  if (!S.device || !S.card) { updateButtons(); return; }
+  if (!tokenValid(90000)) { showLogin('Your sign-in is about to run out. Please sign in again.'); return; }
   if (!window.confirm('Start "' + S.card.title + '" on "' + S.device.name + '" now?\n\nIt will play for ' + PLAY_SECONDS + ' seconds, then stop.')) return;
-  const run = { started: Date.now(), stopped: false, startReply: null, stopReply: null, sawPlaying: false, readings: [], startKB: S.status ? S.status.freeDisk : null, cardId: S.card.id };
-  run.readings.push({ at: 0, kb: S.status && typeof S.status.freeDisk === 'number' ? S.status.freeDisk : null, label: 'before start' });
+  S.starting = true;
+  const run = { started: 0, stopped: false, stopping: false, stopDone: false, stopConfirmed: false, startReply: null, stopReply: null, sawPlaying: false, cardId: S.card.id, deviceId: S.device.id };
   S.run = run; S.lostWarned = false;
-  $('s5').hidden = false; $('s6').hidden = true; $('runMsg').className = 'soft'; $('runMsg').textContent = 'Sent. Waiting for the player…';
-  $('startBtn').disabled = true; $('connectBtn').disabled = true;
-  const payload = JSON.stringify({ uri: 'https://yoto.io/' + S.card.id });
-  note('sent card/start');
-  S.client.publish(topic('command/card/start'), payload, { qos: 1 });
+  document.body.classList.add('running');
+  $('s5').hidden = false; $('s6').hidden = true; $('manualBtn').hidden = true;
+  $('stopBtn').disabled = true; $('stopBtn').textContent = 'STOP NOW';
+  $('countdown').textContent = 'Checking…'; setRun('soft', 'Connecting and checking that the player is idle. Nothing has been started yet.'); setRun2('soft', '');
+  updateButtons();
+  try {
+    await openConnection();
+    const st = await askState(STATE_WAIT_MS);
+    paintState(st.status, st.event);
+    const probs = stateProblems(S.device, st.status, st.event);
+    if (probs.length) return endAbort('Not started. ' + probs.join(' '));
+    if (!S.connected || !S.client) return endAbort('Not started: the connection closed before the card could be started. Nothing was played. Press Start again.');
+  } catch (e) {
+    if (e.message === 'signin') { endAbort('Not started.'); showLogin('Your sign-in has run out. Please sign in again.'); return; }
+    return endAbort('Not started: ' + (e.message || String(e)));
+  }
+  // The player is idle and the connection is fresh: start straight away.
+  run.started = Date.now();
+  note('sending card/start');
+  S.client.publish(topic('command/card/start'), JSON.stringify({ uri: 'https://yoto.io/' + run.cardId }), { qos: 1 });
+  S.starting = false;
+  setRun('soft', 'Start sent. Waiting for the player…');
+  $('stopBtn').disabled = false;
   let left = PLAY_SECONDS;
   $('countdown').textContent = left + 's';
-  S.countdownTimer = setInterval(() => { left = Math.max(0, left - 1); $('countdown').textContent = left + 's'; }, 1000);
-  S.timers.push(setTimeout(() => stopCard('timer'), PLAY_SECONDS * 1000));
-  if (!S.noStatusMode) for (const sec of READ_AT) S.timers.push(setTimeout(() => takeReading(sec), sec * 1000));
-  paintRun();
+  S.countdownTimer = setInterval(() => { left = Math.max(0, left - 1); if (!run.stopping) $('countdown').textContent = left + 's'; }, 1000);
+  S.timers.push(setTimeout(() => stopSequence('timer'), PLAY_SECONDS * 1000));
+  paintRun(); updateButtons();
 }
-function stopCard(why) {
+// Sends Stop and waits for the player to confirm it. Reconnects if the connection has closed. Never assumes it worked.
+async function stopSequence(why) {
   const run = S.run;
+  if (!run || !run.started || run.stopping || run.stopped) return;
+  run.stopping = true;
   clearInterval(S.countdownTimer); S.countdownTimer = null;
-  if (S.client && S.connected) {
-    try { S.client.publish(topic('command/card/stop'), '{}', { qos: 1 }); } catch (e) {}
-    S.timers.push(setTimeout(() => { try { if (S.client && S.connected) S.client.publish(topic('command/card/stop'), '{}', { qos: 1 }); } catch (e) {} }, 2000));
-    note('sent card/stop (' + why + ')');
-    $('runMsg').className = 'soft'; $('runMsg').textContent = 'Stop sent' + (why === 'button' ? ' (you pressed the button)' : '') + '.';
-  } else {
-    $('runMsg').className = 'err'; $('runMsg').textContent = 'Cannot reach the player from here. Pause it using its own button now.';
+  $('countdown').textContent = 'Stopping…'; $('stopBtn').disabled = true; $('manualBtn').hidden = true;
+  setRun2('soft', 'Sending Stop…');
+  let confirmed = false;
+  for (let attempt = 1; attempt <= 4 && !confirmed; attempt++) {
+    try {
+      if (!S.client || !S.connected) { note('reconnecting to send stop (attempt ' + attempt + ')'); await openConnection(); }
+      run.stopReply = null;
+      S.client.publish(topic('command/card/stop'), '{}', { qos: 1 });
+      note('sent card/stop (' + why + ', attempt ' + attempt + ')');
+      const t0 = Date.now();
+      while (run.stopReply == null && S.connected && Date.now() - t0 < STOP_WAIT_MS) await sleep(100);
+      if (run.stopReply === 'OK') confirmed = true;
+      else note('no confirmation of stop (reply: ' + run.stopReply + ')');
+    } catch (e) { note('stop attempt failed: ' + (e.message || e)); await sleep(500); }
   }
-  if (run && !run.stopped) { run.stopped = true; run.stoppedAt = Date.now(); }
-  $('countdown').textContent = 'Stopped';
-  $('stopBtn').textContent = 'Stop sent again';
-  $('s6').hidden = false;
-  paintResults(); updateButtons();
+  run.stopping = false;
+  if (confirmed) {
+    run.stopped = true; run.stopDone = true; run.stopConfirmed = true;
+    $('countdown').textContent = 'Stopped'; $('stopBtn').textContent = 'Stopped';
+    setRun2('good', 'The player confirmed Stop.');
+    document.body.classList.remove('running'); closeClient();
+  } else {
+    $('countdown').textContent = 'NOT CONFIRMED'; $('stopBtn').disabled = false; $('stopBtn').textContent = 'Try Stop again'; $('manualBtn').hidden = false;
+    setRun2('err', "Couldn't confirm that the player stopped. Pause it with its own button now, then press \"I paused it myself\".");
+  }
+  $('s6').hidden = false; paintResults(); paintDbg(); updateButtons();
 }
-async function takeReading(sec) {
-  const run = S.run; if (!run) return;
-  const st = await readStatus(8000);
-  run.readings.push({ at: sec, kb: st && typeof st.freeDisk === 'number' ? st.freeDisk : null, label: sec + 's' });
-  paintResults();
+function manualStopped() {
+  const r = S.run; if (!r) return;
+  r.stopped = true; r.stopDone = true; r.stopConfirmed = false; r.manualStop = true;
+  $('manualBtn').hidden = true; $('stopBtn').disabled = true; $('countdown').textContent = 'Stopped by hand';
+  setRun2('soft', 'Noted that you paused it yourself.');
+  document.body.classList.remove('running'); closeClient(); paintResults(); updateButtons();
 }
 function paintRun() {
-  const r = S.run; if (!r || S.lostWarned) return;
-  if (r.startReply === 'OK') { $('runMsg').className = 'good'; $('runMsg').textContent = 'The player replied OK to the start command.'; }
-  else if (r.startReply === 'FAIL') { $('runMsg').className = 'err'; $('runMsg').textContent = 'The player replied FAIL. It did not start the card.'; }
+  const r = S.run; if (!r) return;
+  if (r.startReply === 'OK') setRun('good', 'The player replied OK to the start command.');
+  else if (r.startReply === 'FAIL') setRun('err', 'The player replied FAIL. It did not start the card.');
 }
 function paintResults() {
   const r = S.run; if (!r) return;
   $('s6').hidden = false;
-  const tbl = $('readTbl');
-  while (tbl.rows.length > 1) tbl.deleteRow(1);
-  const base = r.readings.find((x) => x.kb != null);
-  for (const x of r.readings) {
-    const row = tbl.insertRow();
-    row.insertCell().textContent = x.label;
-    row.insertCell().textContent = x.kb != null ? fmtKB(x.kb) : 'no answer';
-    row.insertCell().textContent = x.kb != null && base && x !== base ? describeChange(base.kb, x.kb) : '';
-  }
-  const v = verdictFrom({ started: !!r.started, startReply: r.startReply, sawPlaying: r.sawPlaying, readings: r.readings.map((x) => ({ kb: x.kb })) });
-  $('verdict').className = v.cls; $('verdict').textContent = v.text + (S.noStatusMode ? " This player doesn't report its free space, so the signal is the Yoto app's Audio download status screen, and Library Check tomorrow." : '');
-  $('readTbl').hidden = !!S.noStatusMode; $('rereadBtn').hidden = !!S.noStatusMode;
+  const v = verdictFrom({ started: !!r.started, startReply: r.startReply, sawPlaying: r.sawPlaying, readings: [] });
+  const stopText = r.stopConfirmed ? ' The player confirmed Stop.' : (r.manualStop ? ' You paused it by hand.' : ' Stop was not confirmed.');
+  $('verdict').className = v.cls;
+  $('verdict').textContent = v.text + stopText + " This player doesn't report its free space, so the signal to watch is the Yoto app's Audio download status screen, then Library Check tomorrow.";
   $('out').textContent = JSON.stringify(report(), null, 2);
 }
 function report() {
@@ -552,17 +613,9 @@ function report() {
   return {
     version: VERSION, when: new Date().toISOString(), player: S.device ? { name: S.device.name, id: mask(S.device.id), type: S.device.type } : null,
     card: S.card ? { title: S.card.title, id: S.card.id } : null, connectedVia: S.mqttAttempt, connectErrors: S.mqttErrors,
-    playSeconds: PLAY_SECONDS, startReply: r.startReply, stopReply: r.stopReply, sawPlayingEvent: r.sawPlaying,
-    freeSpaceKB: (r.readings || []).map((x) => ({ at: x.label, kb: x.kb })), lastStatus: S.status, noStatusMode: !!S.noStatusMode, lastEvent: S.lastEvent || null, log: S.log
+    playSeconds: PLAY_SECONDS, startReply: r.startReply, stopReply: r.stopReply, stopConfirmed: !!r.stopConfirmed, manualStop: !!r.manualStop, sawPlayingEvent: r.sawPlaying,
+    connectionLifetimesSeconds: S.closeAfter, lastEvent: S.lastEvent || null, log: S.log
   };
-}
-async function rereadNow() {
-  const r = S.run; if (!r) return;
-  const sec = Math.round((Date.now() - r.started) / 1000);
-  $('rereadBtn').disabled = true;
-  const st = await readStatus(8000);
-  r.readings.push({ at: sec, kb: st && typeof st.freeDisk === 'number' ? st.freeDisk : null, label: sec + 's' });
-  paintResults(); $('rereadBtn').disabled = false;
 }
 async function copyResults() {
   const text = JSON.stringify(report(), null, 2);
@@ -571,14 +624,14 @@ async function copyResults() {
   setTimeout(() => { $('copyBtn').textContent = 'Copy results'; }, 2500);
 }
 function disconnectNow() {
-  try { if (S.client) S.client.end(true); } catch (e) {}
-  S.client = null; S.connected = false; clearTimers();
+  closeClient();
   $('doneBtn').textContent = 'Disconnected'; updateButtons();
 }
 
 /* ---------- wire up ---------- */
 function wire() {
   $('secsTxt').textContent = String(PLAY_SECONDS);
+  $('readTbl').hidden = true; $('rereadBtn').hidden = true;
   $('idSave').addEventListener('click', () => {
     const v = $('idInput').value.trim();
     if (!/^[A-Za-z0-9_-]{10,}$/.test(v)) { showLogin('That does not look like a Client ID. Copy it again from the Yoto developer site.'); return; }
@@ -586,21 +639,21 @@ function wire() {
   });
   $('loginBtn').addEventListener('click', startLogin);
   $('cardSearch').addEventListener('input', renderCards);
-  $('connectBtn').addEventListener('click', connectAndRead);
+  $('connectBtn').addEventListener('click', checkPlayer);
   $('dbgCopy').addEventListener('click', async () => {
     paintDbg();
     try { await navigator.clipboard.writeText($('connDbg').textContent); $('dbgCopy').textContent = 'Copied ✓'; }
     catch (e) { try { const rg = document.createRange(); rg.selectNodeContents($('connDbg')); const s = getSelection(); s.removeAllRanges(); s.addRange(rg); $('dbgCopy').textContent = 'Selected: press Copy on your keyboard'; } catch (e2) {} }
     setTimeout(() => { $('dbgCopy').textContent = 'Copy diagnostics'; }, 2500);
   });
-  for (const id of ['ck1', 'ck2', 'ck3', 'ck4']) $(id).addEventListener('change', updateButtons);
+  for (const id of ['ck1', 'ck2', 'ck3']) $(id).addEventListener('change', updateButtons);
   $('startBtn').addEventListener('click', startCard);
-  $('stopBtn').addEventListener('click', () => stopCard('button'));
-  $('rereadBtn').addEventListener('click', rereadNow);
+  $('stopBtn').addEventListener('click', () => stopSequence('button'));
+  $('manualBtn').addEventListener('click', manualStopped);
   $('copyBtn').addEventListener('click', copyResults);
   $('doneBtn').addEventListener('click', disconnectNow);
-  $('restart').addEventListener('click', () => { resetConnection(); location.href = CONFIG.redirectUri; });
-  $('signOut').addEventListener('click', () => { resetConnection(); unstore('rt_tokens'); showLogin(); });
+  $('restart').addEventListener('click', () => { if (running() || S.starting) { window.alert('A card is still running. Press STOP NOW first.'); return; } resetConnection(); location.href = CONFIG.redirectUri; });
+  $('signOut').addEventListener('click', () => { if (running() || S.starting) { window.alert('A card is still running. Press STOP NOW first.'); return; } resetConnection(); unstore('rt_tokens'); showLogin(); });
   window.addEventListener('beforeunload', (e) => { if (S.run && S.run.started && !S.run.stopped) { e.preventDefault(); e.returnValue = ''; } });
 }
 
