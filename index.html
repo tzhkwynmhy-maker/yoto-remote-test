@@ -101,6 +101,7 @@
     <label class="chk" id="ck4row" hidden><input type="checkbox" id="ck4"> <span>I can see the player is <b>idle</b> and has <b>no card</b> in it. (This page cannot check that for this player.)</span></label>
     <p class="soft">The card plays for <b id="secsTxt">20</b> seconds, then this page stops it. The big red button stops it at any time.</p>
     <div class="row"><button id="startBtn" class="pri" disabled>Start the card</button></div>
+    <p id="whyNo" class="warn"></p>
   </div>
 
   <div class="panel" id="s5" hidden>
@@ -131,7 +132,7 @@
 <script>
 'use strict';
 
-const VERSION = 'v3: can run without the player state report';
+const VERSION = 'v4: shows why Start is blocked, ignores stale closes';
 const PLAY_SECONDS = 20;                  // how long the card plays before the page stops it
 const READ_AT = [10, 30, 60, 120];        // seconds after starting: read the player's free space again
 const MQTT_URL = 'wss://aqrphjqbp3u2z-ats.iot.eu-west-2.amazonaws.com/mqtt';
@@ -372,7 +373,7 @@ async function connectAndRead() {
     if (!client) throw new Error("Couldn't connect to Yoto's player server from this page. " + S.mqttErrors.join(' | '));
     S.client = client; S.connected = true; S.lostWarned = false;
     client.on('message', onMessage);
-    client.on('close', onClosed);
+    client.on('close', () => onClosed(client));
     client.on('error', (e) => note('mqtt error: ' + (e && e.message || e)));
     await new Promise((res, rej) => client.subscribe([topic('data/events'), topic('data/status'), topic('response')], (err, granted) => { note('subscribed: ' + (granted || []).map((g) => g.topic.split('/').slice(2).join('/') + ' qos' + g.qos).join(', ')); err ? rej(err) : res(); }));
     try { client.publish(topic('command/events/request'), '{}'); note('asked for events'); } catch (e) {}
@@ -434,8 +435,11 @@ function onMessage(tp, buf) {
     if (S.run) S.run.lastEvent = p.playbackStatus;
   }
 }
-function onClosed() {
-  S.connected = false;
+function onClosed(c) {
+  if (c !== S.client) return;            // a connection we already replaced or ended on purpose
+  S.connected = false; S.lost = true;
+  note('connection closed');
+  if (!(S.run && S.run.started)) { $('connMsg').className = 'err'; $('connMsg').textContent = 'The connection to the player closed. Press "Connect and read player" again.'; }
   if (S.run && S.run.started && !S.run.stopped && !S.lostWarned) {
     S.lostWarned = true;
     $('runMsg').className = 'err';
@@ -447,7 +451,7 @@ function resetConnection() {
   clearTimers();
   try { if (S.client) S.client.end(true); } catch (e) {}
   S.client = null; S.connected = false; S.status = null; S.statusAt = 0; S.mqttErrors = []; S.run = null;
-  S.noStatusMode = false; S.acked = false; S.lastEvent = null; $('ck4row').hidden = true;
+  S.lost = false; S.noStatusMode = false; S.acked = false; S.lastEvent = null; $('ck4row').hidden = true;
   $('statTbl').hidden = true; $('s5').hidden = true; $('s6').hidden = true; $('connMsg').textContent = '';
   for (const id of ['ck1', 'ck2', 'ck3', 'ck4']) $(id).checked = false;
 }
@@ -468,6 +472,15 @@ function updateButtons() {
   const probs = blockers(S.device, S.status, S.noStatusMode, S.lastEvent);
   const ready = S.connected && (S.status || S.noStatusMode) && !probs.length && $('ck1').checked && $('ck2').checked && $('ck3').checked && (!S.noStatusMode || $('ck4').checked) && S.card && !(S.run && S.run.started);
   $('startBtn').disabled = !ready;
+  let why = '';
+  if (!ready && !(S.run && S.run.started)) {
+    if (!S.card) why = 'Choose a card in box 2.';
+    else if (!S.client || !S.connected) why = S.lost ? 'The connection to the player has closed. Press "Connect and read player" again.' : 'Press "Connect and read player" first.';
+    else if (!(S.status || S.noStatusMode)) why = 'Waiting for the player to answer.';
+    else if (probs.length) why = probs.join(' ');
+    else why = 'Tick all the boxes above' + (S.noStatusMode ? ' (all four).' : '.');
+  }
+  $('whyNo').textContent = why;
   if ((S.status || S.noStatusMode) && probs.length && S.connected) { $('connMsg').className = 'warn'; $('connMsg').textContent = probs.join(' '); }
 }
 function startCard() {
