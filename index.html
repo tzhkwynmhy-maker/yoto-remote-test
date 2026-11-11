@@ -10,6 +10,7 @@
   * { box-sizing: border-box; }
   [hidden] { display:none !important; }
   .running #s1, .running #s2 { pointer-events:none; opacity:.55; }
+  #verdict { white-space: pre-line; }
   body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif; }
   main { max-width:680px; margin:0 auto; padding:max(env(safe-area-inset-top),14px) 14px 60px; }
   h1 { margin:6px 0 2px; font-size:1.5rem; }
@@ -71,9 +72,10 @@
   </div>
 
   <div class="panel" id="s2">
-    <h2>2. Which card?</h2>
+    <h2>2. Which card(s)? <span class="soft" style="font-weight:400;font-size:.9rem">pick 1 to 3</span></h2>
     <input id="cardSearch" type="search" placeholder="Search your playlists" autocomplete="off" autocapitalize="off" spellcheck="false" value="barbie">
     <div id="cardList" class="list"><span class="soft">Loading playlists…</span></div>
+    <p id="selSummary" class="soft"></p>
   </div>
 
   <div class="panel" id="s3">
@@ -96,16 +98,17 @@
 
   <div class="panel" id="s4">
     <h2>4. Before starting</h2>
-    <label class="chk"><input type="checkbox" id="ck1"> <span>I turned the player's volume <b>right down</b> using the player's own buttons.</span></label>
-    <label class="chk"><input type="checkbox" id="ck2"> <span>Willow is <b>not using</b> this player and nothing is playing on it.</span></label>
+    <label class="chk"><input type="checkbox" id="ck1"> <span>I've checked the player's volume is turned to a level I'm happy for it to play at right now.</span></label>
+    <label class="chk"><input type="checkbox" id="ck2"> <span>The player is <b>plugged in</b>, its clock shows <b>red numbers</b> (connected to Wi-Fi), and <b>nothing is playing</b> on it. Willow is not using it.</span></label>
     <label class="chk"><input type="checkbox" id="ck3"> <span>I will keep this page open on screen until it says it's finished.</span></label>
-    <p class="soft">The card plays for <b id="secsTxt">20</b> seconds, then this page stops it. The big red button stops it at any time.</p>
+    <p class="soft">Each card plays for <b id="secsTxt">20</b> seconds, then this page stops it. The big red button stops it at any time.</p>
     <div class="row"><button id="startBtn" class="pri" disabled>Start the card</button></div>
     <p id="whyNo" class="warn"></p>
   </div>
 
   <div class="panel" id="s5" hidden>
     <h2>Running</h2>
+    <p id="seqInfo" class="soft"></p>
     <div class="big" id="countdown"></div>
     <button id="stopBtn" class="stop">STOP NOW</button>
     <p id="runMsg" class="soft"></p>
@@ -134,12 +137,14 @@
 <script>
 'use strict';
 
-const VERSION = 'v5: short-lived connections, reconnect-to-stop with confirmation';
+const VERSION = 'v6: several cards in a row, real reply names';
 const PLAY_SECONDS = 20;                  // how long the card plays before the page stops it
 const STATE_WAIT_MS = 6000;   // how long to wait for the player to say what it is doing
 const EXTRA_WAIT_MS = 800;    // after the first report, wait a moment for a second kind of report
 const STOP_WAIT_MS = 3000;    // how long to wait for the player to confirm Stop before trying again
 const HOLD_SECONDS = 12;      // 'Check the player' watches the connection for this long
+const MAX_CARDS = 3;          // cards allowed in one test run
+const SEQ_GAP_MS = 4000;      // pause between one card stopping and the next being checked
 const MQTT_URL = 'wss://aqrphjqbp3u2z-ats.iot.eu-west-2.amazonaws.com/mqtt';
 const AUTHORIZER = 'PublicJWTAuthorizer';
 const MQTT_LIBS = ['https://cdn.jsdelivr.net/npm/mqtt@5.10.1/dist/mqtt.min.js', 'https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js'];
@@ -304,7 +309,7 @@ function renderDevices() {
   for (const d of S.devices) {
     const r = el('input', { type: 'radio', name: 'dev' });
     r.checked = S.device && S.device.id === d.id;
-    r.addEventListener('change', () => { if (running() || S.starting || S.checking) { renderDevices(); return; } S.device = d; resetConnection(); updateButtons(); });
+    r.addEventListener('change', () => { if (busyNow()) { renderDevices(); return; } S.device = d; resetConnection(); updateButtons(); });
     box.append(el('label', { class: 'pick' }, r, el('span', {}, d.name + ' ' + (d.online ? '(online)' : '(offline)'))));
   }
 }
@@ -312,15 +317,24 @@ function renderCards() {
   const box = $('cardList'); box.replaceChildren();
   const q = $('cardSearch').value.trim().toLowerCase();
   const list = S.cards.filter((c) => q.split(/\s+/).filter(Boolean).every((w) => c.title.toLowerCase().includes(w))).slice(0, 30);
-  if (!list.length) { box.textContent = 'Nothing matches.'; return; }
+  if (!list.length) box.textContent = 'Nothing matches.';
   for (const c of list) {
-    const r = el('input', { type: 'radio', name: 'card' });
-    r.checked = S.card && S.card.id === c.id;
-    r.addEventListener('change', () => { S.card = c; updateButtons(); });
+    const r = el('input', { type: 'checkbox' });
+    r.checked = S.sel.some((x) => x.id === c.id);
+    r.addEventListener('change', () => {
+      if (busyNow()) { renderCards(); return; }
+      if (r.checked) {
+        if (S.sel.length >= MAX_CARDS) { r.checked = false; $('selSummary').textContent = 'You can pick up to ' + MAX_CARDS + ' cards for a test.'; return; }
+        S.sel.push(c);
+      } else S.sel = S.sel.filter((x) => x.id !== c.id);
+      paintSel(); updateButtons();
+    });
     const img = el('img', { alt: '' }); if (c.cover) img.src = c.cover;
     box.append(el('label', { class: 'pick' }, r, img, el('span', {}, c.title)));
   }
+  paintSel();
 }
+function paintSel() { $('selSummary').textContent = S.sel.length ? 'Selected (they run in this order): ' + S.sel.map((c, i) => (i + 1) + '. ' + c.title).join(' · ') : 'Nothing selected yet.'; }
 
 /* ---------- MQTT ---------- */
 function loadScript(src) {
@@ -361,11 +375,13 @@ function tryConnect(label, url) {
     client.on('close', () => finish('connection closed straight away'));
   });
 }
-S.closeAfter = []; S.stateSeq = 0;
+S.closeAfter = []; S.stateSeq = 0; S.sel = []; S.results = []; S.haltNote = '';
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 function setRun(cls, text) { $('runMsg').className = cls; $('runMsg').textContent = text; }
 function setRun2(cls, text) { $('runMsg2').className = cls; $('runMsg2').textContent = text; }
 function running() { return !!(S.run && S.run.started && !S.run.stopped); }
+function busyNow() { return running() || !!S.starting || !!S.checking || !!S.seqActive; }
+function needMargin() { return (Math.max(1, S.sel.length) * (PLAY_SECONDS + 25) + 30) * 1000; }
 
 function closeClient() {
   const old = S.client; S.client = null; S.connected = false;
@@ -424,7 +440,7 @@ function paintState(status, event) {
   $('stDisk').textContent = status && status.freeDisk != null ? fmtKB(status.freeDisk) : 'not reported by this player';
 }
 async function checkPlayer() {
-  if (running() || S.starting || S.checking) return;
+  if (busyNow()) return;
   const msg = $('connMsg');
   if (!tokenValid()) { showLogin('Your sign-in has run out. Please sign in again.'); return; }
   if (!S.device) return;
@@ -464,8 +480,11 @@ function onMessage(tp, buf) {
     const key = Object.keys(p.status).find((k) => k !== 'req_body');
     const val = key && p.status[key];
     note('player reply: ' + key + ' ' + val);
-    if (key === 'card' && S.run) {
-      let what = ''; try { what = JSON.parse(p.status.req_body || '{}').uri ? 'start' : 'stop'; } catch (e) {}
+    if (key && key.indexOf('card') === 0 && S.run) {
+      // The real player says "card-play" and "card-stop" (Yoto's docs say "card"), so accept both.
+      let what = '';
+      if (key === 'card-play') what = 'start'; else if (key === 'card-stop') what = 'stop';
+      else if (key === 'card') { try { what = JSON.parse(p.status.req_body || '{}').uri ? 'start' : 'stop'; } catch (e) {} }
       if (what === 'start') { S.run.startReply = val; paintRun(); } else if (what === 'stop') S.run.stopReply = val;
     }
   } else if (kind === 'data/events') {
@@ -484,9 +503,9 @@ function onClosed(c) {
 }
 // Returns false (and does nothing) while a card is running or starting.
 function resetConnection() {
-  if (running() || S.starting || S.checking) return false;
+  if (busyNow()) return false;
   clearTimers(); closeClient();
-  S.status = null; S.lastEvent = null; S.stateSeq = 0; S.mqttErrors = []; S.run = null; S.lost = false;
+  S.status = null; S.lastEvent = null; S.stateSeq = 0; S.mqttErrors = []; S.run = null; S.lost = false; S.results = []; S.haltNote = '';
   $('statTbl').hidden = true; $('s5').hidden = true; $('s6').hidden = true; $('connMsg').textContent = ''; $('manualBtn').hidden = true;
   document.body.classList.remove('running');
   for (const id of ['ck1', 'ck2', 'ck3']) $(id).checked = false;
@@ -495,55 +514,56 @@ function resetConnection() {
 
 /* ---------- running the test ---------- */
 function updateButtons() {
-  const busy = running() || !!S.starting || !!S.checking;
-  $('connectBtn').disabled = !(S.device && S.card && tokenValid()) || busy;
+  const busy = busyNow();
+  $('connectBtn').disabled = !(S.device && tokenValid()) || busy;
   const ticked = $('ck1').checked && $('ck2').checked && $('ck3').checked;
-  const ready = !!(S.device && S.card && tokenValid(90000) && ticked && !busy);
+  const n = S.sel.length;
+  const ready = !!(S.device && n && tokenValid(needMargin()) && ticked && !busy);
   $('startBtn').disabled = !ready;
+  $('startBtn').textContent = n > 1 ? 'Start ' + n + ' cards in a row' : 'Start the card';
   let why = '';
   if (!ready && !busy) {
     if (!S.device) why = 'Choose a player in box 1.';
-    else if (!S.card) why = 'Choose a card in box 2.';
-    else if (!tokenValid(90000)) why = 'Your sign-in is about to run out. Press "Start again" and sign in.';
+    else if (!n) why = 'Choose a card in box 2.';
+    else if (!tokenValid(needMargin())) why = 'Your sign-in is about to run out. Press "Start again" and sign in.';
     else why = 'Tick all three boxes above.';
   }
   $('whyNo').textContent = why;
 }
-function endAbort(text) {
-  setRun('err', text);
+function abortRun(run) {
+  setRun('err', run.aborted);
   $('countdown').textContent = 'Not started';
   $('stopBtn').disabled = true;
-  closeClient(); S.starting = false; S.run = null;
-  document.body.classList.remove('running');
-  paintDbg(); updateButtons();
+  closeClient(); S.starting = false;
 }
-async function startCard() {
-  if (running() || S.starting || S.checking) return;
-  if (!S.device || !S.card) { updateButtons(); return; }
-  if (!tokenValid(90000)) { showLogin('Your sign-in is about to run out. Please sign in again.'); return; }
-  if (!window.confirm('Start "' + S.card.title + '" on "' + S.device.name + '" now?\n\nIt will play for ' + PLAY_SECONDS + ' seconds, then stop.')) return;
+// Runs ONE card: fresh connection, idle check, start, then the stop timer. Resolves 'stopped', 'aborted' or 'unconfirmed'.
+async function runOne(card, idx, total) {
   S.starting = true;
-  const run = { started: 0, stopped: false, stopping: false, stopDone: false, stopConfirmed: false, startReply: null, stopReply: null, sawPlaying: false, cardId: S.card.id, deviceId: S.device.id };
-  S.run = run; S.lostWarned = false;
-  document.body.classList.add('running');
-  $('s5').hidden = false; $('s6').hidden = true; $('manualBtn').hidden = true;
+  const run = { title: card.title, started: 0, stopped: false, stopping: false, stopDone: false, stopConfirmed: false, startReply: null, stopReply: null, sawPlaying: false, cardId: card.id, deviceId: S.device.id, aborted: '' };
+  run.done = new Promise((res) => { run.finish = (r) => { if (!run.finished) { run.finished = true; res(r); } }; });
+  S.run = run; S.results.push(run); S.lostWarned = false;
+  $('seqInfo').textContent = total > 1 ? 'Card ' + idx + ' of ' + total + ': ' + card.title : card.title;
+  $('s5').hidden = false; $('manualBtn').hidden = true;
   $('stopBtn').disabled = true; $('stopBtn').textContent = 'STOP NOW';
   $('countdown').textContent = 'Checking…'; setRun('soft', 'Connecting and checking that the player is idle. Nothing has been started yet.'); setRun2('soft', '');
   updateButtons();
+  let proceed = false;
   try {
     await openConnection();
     const st = await askState(STATE_WAIT_MS);
     paintState(st.status, st.event);
     const probs = stateProblems(S.device, st.status, st.event);
-    if (probs.length) return endAbort('Not started. ' + probs.join(' '));
-    if (!S.connected || !S.client) return endAbort('Not started: the connection closed before the card could be started. Nothing was played. Press Start again.');
+    if (probs.length) run.aborted = 'Not started. ' + probs.join(' ');
+    else if (!S.connected || !S.client) run.aborted = 'Not started: the connection closed before the card could be started. Nothing was played. Press Start again.';
+    else proceed = true;
   } catch (e) {
-    if (e.message === 'signin') { endAbort('Not started.'); showLogin('Your sign-in has run out. Please sign in again.'); return; }
-    return endAbort('Not started: ' + (e.message || String(e)));
+    run.aborted = e.message === 'signin' ? 'Not started: your sign-in has run out.' : 'Not started: ' + (e.message || String(e));
+    run.signin = e.message === 'signin';
   }
+  if (!proceed) { abortRun(run); return 'aborted'; }
   // The player is idle and the connection is fresh: start straight away.
   run.started = Date.now();
-  note('sending card/start');
+  note('sending card/start (' + card.id + ')');
   S.client.publish(topic('command/card/start'), JSON.stringify({ uri: 'https://yoto.io/' + run.cardId }), { qos: 1 });
   S.starting = false;
   setRun('soft', 'Start sent. Waiting for the player…');
@@ -553,6 +573,33 @@ async function startCard() {
   S.countdownTimer = setInterval(() => { left = Math.max(0, left - 1); if (!run.stopping) $('countdown').textContent = left + 's'; }, 1000);
   S.timers.push(setTimeout(() => stopSequence('timer'), PLAY_SECONDS * 1000));
   paintRun(); updateButtons();
+  return run.done;
+}
+// The Start button: runs the chosen cards one after another. Halts at the first card that does not start or does not confirm Stop.
+async function startSequence() {
+  if (busyNow()) return;
+  if (!S.device || !S.sel.length) { updateButtons(); return; }
+  if (!tokenValid(needMargin())) { showLogin('Your sign-in is about to run out. Please sign in again.'); return; }
+  const cards = S.sel.slice(), n = cards.length;
+  const list = cards.map((c, i) => (n > 1 ? (i + 1) + '. ' : '') + c.title).join('\n');
+  if (!window.confirm('Start on "' + S.device.name + '":\n\n' + list + '\n\nEach card plays for ' + PLAY_SECONDS + ' seconds, then is stopped' + (n > 1 ? ' before the next one is started.' : '.'))) return;
+  S.seqActive = true; S.results = []; S.haltNote = '';
+  document.body.classList.add('running');
+  $('s6').hidden = true;
+  for (let i = 0; i < n; i++) {
+    const r = await runOne(cards[i], i + 1, n);
+    if (r !== 'stopped') {
+      S.haltNote = r === 'aborted' ? 'The run was halted because "' + cards[i].title + '" was not started' + (i + 1 < n ? ', so the remaining cards were not started either.' : '.')
+        : 'The run was halted because Stop could not be confirmed for "' + cards[i].title + '".';
+      if (r === 'aborted' && S.run && S.run.signin) showLogin('Your sign-in has run out. Please sign in again.');
+      break;
+    }
+    if (i < n - 1) { $('countdown').textContent = 'Next card soon…'; setRun2('soft', ''); await sleep(SEQ_GAP_MS); }
+  }
+  S.seqActive = false;
+  if (S.results.some((r) => r.started)) for (const id of ['ck1', 'ck2', 'ck3']) $(id).checked = false;   // confirm again before the next run
+  if (!running()) document.body.classList.remove('running');
+  paintResults(); paintDbg(); updateButtons();
 }
 // Sends Stop and waits for the player to confirm it. Reconnects if the connection has closed. Never assumes it worked.
 async function stopSequence(why) {
@@ -580,10 +627,11 @@ async function stopSequence(why) {
     run.stopped = true; run.stopDone = true; run.stopConfirmed = true;
     $('countdown').textContent = 'Stopped'; $('stopBtn').textContent = 'Stopped';
     setRun2('good', 'The player confirmed Stop.');
-    document.body.classList.remove('running'); closeClient();
+    if (!S.seqActive) document.body.classList.remove('running'); closeClient(); run.finish('stopped');
   } else {
     $('countdown').textContent = 'NOT CONFIRMED'; $('stopBtn').disabled = false; $('stopBtn').textContent = 'Try Stop again'; $('manualBtn').hidden = false;
     setRun2('err', "Couldn't confirm that the player stopped. Pause it with its own button now, then press \"I paused it myself\".");
+    run.finish('unconfirmed');
   }
   $('s6').hidden = false; paintResults(); paintDbg(); updateButtons();
 }
@@ -600,21 +648,26 @@ function paintRun() {
   else if (r.startReply === 'FAIL') setRun('err', 'The player replied FAIL. It did not start the card.');
 }
 function paintResults() {
-  const r = S.run; if (!r) return;
   $('s6').hidden = false;
-  const v = verdictFrom({ started: !!r.started, startReply: r.startReply, sawPlaying: r.sawPlaying, readings: [] });
-  const stopText = r.stopConfirmed ? ' The player confirmed Stop.' : (r.manualStop ? ' You paused it by hand.' : ' Stop was not confirmed.');
-  $('verdict').className = v.cls;
-  $('verdict').textContent = v.text + stopText + " This player doesn't report its free space, so the signal to watch is the Yoto app's Audio download status screen, then Library Check tomorrow.";
+  const lines = S.results.map((r, i) => {
+    let t;
+    if (!r.started) t = r.aborted || 'Not started.';
+    else {
+      const v = verdictFrom({ started: true, startReply: r.startReply, sawPlaying: r.sawPlaying, readings: [] });
+      t = v.text + (r.stopConfirmed ? ' The player confirmed Stop.' : (r.manualStop ? ' You paused it by hand.' : ' Stop was not confirmed.'));
+    }
+    return (S.results.length > 1 ? (i + 1) + '. ' + r.title + ': ' : '') + t;
+  });
+  $('verdict').className = '';
+  $('verdict').textContent = lines.join('\n') + (S.haltNote ? '\n' + S.haltNote : '') + "\nThe signal to watch is the Yoto app's Audio download status screen, then Library Check tomorrow.";
   $('out').textContent = JSON.stringify(report(), null, 2);
 }
 function report() {
-  const r = S.run || {};
   return {
     version: VERSION, when: new Date().toISOString(), player: S.device ? { name: S.device.name, id: mask(S.device.id), type: S.device.type } : null,
-    card: S.card ? { title: S.card.title, id: S.card.id } : null, connectedVia: S.mqttAttempt, connectErrors: S.mqttErrors,
-    playSeconds: PLAY_SECONDS, startReply: r.startReply, stopReply: r.stopReply, stopConfirmed: !!r.stopConfirmed, manualStop: !!r.manualStop, sawPlayingEvent: r.sawPlaying,
-    connectionLifetimesSeconds: S.closeAfter, lastEvent: S.lastEvent || null, log: S.log
+    connectedVia: S.mqttAttempt, connectErrors: S.mqttErrors, playSeconds: PLAY_SECONDS,
+    cards: S.results.map((r) => ({ title: r.title, id: r.cardId, startReply: r.startReply, stopReply: r.stopReply, stopConfirmed: !!r.stopConfirmed, manualStop: !!r.manualStop, sawPlayingEvent: r.sawPlaying, notStarted: r.started ? null : (r.aborted || 'not started') })),
+    haltNote: S.haltNote || null, connectionLifetimesSeconds: S.closeAfter, lastEvent: S.lastEvent || null, log: S.log
   };
 }
 async function copyResults() {
@@ -647,14 +700,14 @@ function wire() {
     setTimeout(() => { $('dbgCopy').textContent = 'Copy diagnostics'; }, 2500);
   });
   for (const id of ['ck1', 'ck2', 'ck3']) $(id).addEventListener('change', updateButtons);
-  $('startBtn').addEventListener('click', startCard);
+  $('startBtn').addEventListener('click', startSequence);
   $('stopBtn').addEventListener('click', () => stopSequence('button'));
   $('manualBtn').addEventListener('click', manualStopped);
   $('copyBtn').addEventListener('click', copyResults);
   $('doneBtn').addEventListener('click', disconnectNow);
-  $('restart').addEventListener('click', () => { if (running() || S.starting) { window.alert('A card is still running. Press STOP NOW first.'); return; } resetConnection(); location.href = CONFIG.redirectUri; });
-  $('signOut').addEventListener('click', () => { if (running() || S.starting) { window.alert('A card is still running. Press STOP NOW first.'); return; } resetConnection(); unstore('rt_tokens'); showLogin(); });
-  window.addEventListener('beforeunload', (e) => { if (S.run && S.run.started && !S.run.stopped) { e.preventDefault(); e.returnValue = ''; } });
+  $('restart').addEventListener('click', () => { if (busyNow()) { window.alert('A card is still running. Press STOP NOW first.'); return; } resetConnection(); location.href = CONFIG.redirectUri; });
+  $('signOut').addEventListener('click', () => { if (busyNow()) { window.alert('A card is still running. Press STOP NOW first.'); return; } resetConnection(); unstore('rt_tokens'); showLogin(); });
+  window.addEventListener('beforeunload', (e) => { if (busyNow()) { e.preventDefault(); e.returnValue = ''; } });
 }
 
 (async function init() {
