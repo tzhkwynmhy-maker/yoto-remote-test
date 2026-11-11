@@ -80,6 +80,10 @@
     <p class="soft">Reads the player's current state (nothing is played). Needs the player to be switched on and online.</p>
     <div class="row"><button id="connectBtn" class="pri" disabled>Connect and read player</button></div>
     <p id="connMsg" class="soft"></p>
+    <details><summary class="soft">Diagnostics (if something goes wrong)</summary>
+      <div class="row"><button id="dbgCopy">Copy diagnostics</button></div>
+      <pre id="connDbg"></pre>
+    </details>
     <table id="statTbl" hidden>
       <tr><th>Player</th><td id="stName"></td></tr>
       <tr><th>Playing?</th><td id="stPlay"></td></tr>
@@ -126,7 +130,7 @@
 <script>
 'use strict';
 
-const VERSION = 'v1: remote start test';
+const VERSION = 'v2: longer wait for the player, diagnostics box';
 const PLAY_SECONDS = 20;                  // how long the card plays before the page stops it
 const READ_AT = [10, 30, 60, 120];        // seconds after starting: read the player's free space again
 const MQTT_URL = 'wss://aqrphjqbp3u2z-ats.iot.eu-west-2.amazonaws.com/mqtt';
@@ -367,32 +371,40 @@ async function connectAndRead() {
     client.on('message', onMessage);
     client.on('close', onClosed);
     client.on('error', (e) => note('mqtt error: ' + (e && e.message || e)));
-    await new Promise((res, rej) => client.subscribe([topic('data/events'), topic('data/status'), topic('response')], (err) => err ? rej(err) : res()));
+    await new Promise((res, rej) => client.subscribe([topic('data/events'), topic('data/status'), topic('response')], (err, granted) => { note('subscribed: ' + JSON.stringify(granted || null)); err ? rej(err) : res(); }));
+    try { client.publish(topic('command/events/request'), '{}'); note('asked for events'); } catch (e) {}
     note('connected ' + S.mqttAttempt);
-    msg.textContent = 'Connected. Asking the player for its state…';
-    await readStatus(10000);
+    msg.textContent = 'Connected. Asking the player for its state (can take up to 25 seconds)…';
+    await readStatus(25000);
     if (!S.status) throw new Error('Connected, but the player did not answer. Is it switched on and awake? Press a button on it, then try again.');
     msg.className = 'good'; msg.textContent = 'Connected and the player answered.';
   } catch (e) {
-    msg.className = 'err'; msg.textContent = e.message || String(e);
+    msg.className = 'err'; msg.textContent = (e.message || String(e)) + (S.device ? ' (Yoto\'s player list says online: ' + S.device.online + '.)' : '');
     if (!S.status) { try { S.client && S.client.end(true); } catch (e2) {} S.client = null; S.connected = false; }
   }
-  updateButtons();
+  paintDbg(); updateButtons();
+}
+function paintDbg() {
+  $('connDbg').textContent = JSON.stringify({ version: VERSION, player: S.device ? { name: S.device.name, id: mask(S.device.id), onlineInYotoList: S.device.online, type: S.device.type } : null,
+    connectedVia: S.mqttAttempt, connectErrors: S.mqttErrors, gotStatus: !!S.status, log: S.log }, null, 2);
 }
 function readStatus(waitMs) {
   return new Promise((resolve) => {
     if (!S.client || !S.connected) { resolve(null); return; }
     const before = S.statusAt || 0;
-    S.client.publish(topic('command/status/request'), '');
-    const t0 = Date.now();
+    const ask = () => { try { S.client.publish(topic('command/status/request'), ''); note('asked for status'); } catch (e) { note('could not ask: ' + e.message); } };
+    ask();
+    const t0 = Date.now(); let asks = 1;
     const iv = setInterval(() => {
-      if ((S.statusAt || 0) > before || Date.now() - t0 > waitMs) { clearInterval(iv); resolve((S.statusAt || 0) > before ? S.status : null); }
+      if ((S.statusAt || 0) > before || Date.now() - t0 > waitMs) { clearInterval(iv); resolve((S.statusAt || 0) > before ? S.status : null); return; }
+      if (Date.now() - t0 > asks * 5000) { asks++; ask(); }
     }, 100);
   });
 }
 function onMessage(tp, buf) {
   let p; try { p = JSON.parse(buf.toString()); } catch (e) { return; }
   const kind = tp.split('/').slice(2).join('/');
+  note('message on ' + kind);
   if (kind === 'data/status' && p.status) {
     S.status = p.status; S.statusAt = Date.now(); paintStatus();
     if (S.run) S.run.lastStatusKB = p.status.freeDisk;
@@ -548,6 +560,12 @@ function wire() {
   $('loginBtn').addEventListener('click', startLogin);
   $('cardSearch').addEventListener('input', renderCards);
   $('connectBtn').addEventListener('click', connectAndRead);
+  $('dbgCopy').addEventListener('click', async () => {
+    paintDbg();
+    try { await navigator.clipboard.writeText($('connDbg').textContent); $('dbgCopy').textContent = 'Copied ✓'; }
+    catch (e) { try { const rg = document.createRange(); rg.selectNodeContents($('connDbg')); const s = getSelection(); s.removeAllRanges(); s.addRange(rg); $('dbgCopy').textContent = 'Selected: press Copy on your keyboard'; } catch (e2) {} }
+    setTimeout(() => { $('dbgCopy').textContent = 'Copy diagnostics'; }, 2500);
+  });
   for (const id of ['ck1', 'ck2', 'ck3']) $(id).addEventListener('change', updateButtons);
   $('startBtn').addEventListener('click', startCard);
   $('stopBtn').addEventListener('click', () => stopCard('button'));
